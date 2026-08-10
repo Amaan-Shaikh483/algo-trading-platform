@@ -120,6 +120,7 @@ export interface BuilderState {
 
   // Option Trading fields
   underlying: Underlying
+  underlyingInstrument: InstrumentHit | null
   optOrderType: OrderTypeNew
   legs: OptionLeg[]
 
@@ -224,6 +225,7 @@ export function initialBuilderState(): BuilderState {
 
     // Option Trading
     underlying: 'Spot',
+    underlyingInstrument: null,
     optOrderType: 'MIS',
     legs: [newOptionLeg(1)],
 
@@ -415,6 +417,17 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
         strike: null,
       },
     ],
+    underlyingInstrument: {
+      token: row.symbol_token,
+      symbol: row.instrument,
+      name: null,
+      exchange: row.exchange,
+      segment: row.segment,
+      lotsize: null,
+      tick_size: null,
+      expiry: null,
+      strike: null,
+    },
     segment: row.segment,
     timeframe: row.timeframe as Timeframe,
     interval: row.timeframe,

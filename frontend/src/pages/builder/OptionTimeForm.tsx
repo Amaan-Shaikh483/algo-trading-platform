@@ -1,5 +1,6 @@
 import { Plus } from 'lucide-react'
 import { TextInput } from '../../components/ui'
+import InstrumentSearch from '../../components/InstrumentSearch'
 import OperandEditor from '../../components/OperandEditor'
 import { OPERATORS } from '@algo/rule-schema'
 import type { Operator } from '@algo/rule-schema'
@@ -127,6 +128,30 @@ export default function OptionTimeForm({ state, patch }: Props) {
               </button>
             ))}
           </div>
+          <p className="mt-1.5 text-xs text-gray-400">Used for strike price calculations</p>
+        </Field>
+
+        <Field label="Underlying Instrument" required>
+          {state.underlyingInstrument ? (
+            <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5">
+              <span className="text-sm font-medium text-gray-900">
+                {state.underlyingInstrument.symbol}{' '}
+                <span className="ml-2 text-xs text-gray-400">{state.underlyingInstrument.exchange}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => patch({ underlyingInstrument: null })}
+                className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+              >
+                Change
+              </button>
+            </div>
+          ) : (
+            <InstrumentSearch
+              placeholder="Search underlying (e.g. SBIN, NIFTY, RELIANCE)…"
+              onSelect={(hit) => patch({ underlyingInstrument: hit })}
+            />
+          )}
         </Field>
       </SectionCard>
 

@@ -1,8 +1,9 @@
-import type { StrategyRules } from '@algo/rule-schema'
+import type { StrategyRuleLeg, StrategyRules } from '@algo/rule-schema'
 import { indicatorInstanceId } from '@algo/rule-schema'
 import type { Candle } from '../brokers/types'
 import { IndicatorRuntime, collectIndicatorSpecs, hhmmToMinutes, istDayKey, istMinutesOfDay } from './indicatorEngine'
 import { evaluateEntrySignal } from './ruleEvaluator'
+import { hasTimeTriggeredLegs, legSide, markLegFired, pickScheduledLeg } from './timeTriggers'
 
 /**
  * Bar-by-bar backtest engine (spec §3.5).
@@ -253,6 +254,7 @@ export function runBacktestCore(input: {
   let skippedSignals = 0
   let barsInPosition = 0
   const tradesPerDay = new Map<string, number>()
+  const firedLegs = new Set<string>()
 
   const closePosition = (candle: Candle, barIndex: number, rawExitPrice: number, reason: BacktestTrade['exitReason']): void => {
     if (!position) return
@@ -346,20 +348,44 @@ export function runBacktestCore(input: {
     dailyEquity.set(istDayKey(candle.time), equity)
 
     // ── Entries (only when flat) ──
-    if (!position && evaluateEntrySignal(rules, frame)) {
+    if (!position) {
       const dayKey = istDayKey(candle.time)
       const tradesToday = tradesPerDay.get(dayKey) ?? 0
       const pastCutoff = timeSqMinutes != null && istMinutesOfDay(candle.time) >= timeSqMinutes
       const underTradeLimit = tradesToday < rules.risk.maxTradesPerDay
 
-      if (!pastCutoff && underTradeLimit) {
-        const side: 'LONG' | 'SHORT' = rules.direction.side === 'long' ? 'LONG' : 'SHORT'
-        const entrySide: 'buy' | 'sell' = side === 'LONG' ? 'buy' : 'sell'
+      // Resolve this bar's entry intent:
+      //   - time-triggered legs (option-time) → schedule by leg.entryTime;
+      //   - legs without entry time (option-indicator) → signal-driven, legs set side/qty;
+      //   - no legs (stocks-futures) → signal-driven via direction.side + risk.quantity.
+      let trigger: { side: 'LONG' | 'SHORT'; qty: number } | null = null
+      let firedLeg: StrategyRuleLeg | undefined
+
+      if (hasTimeTriggeredLegs(rules.legs)) {
+        const leg = pickScheduledLeg(rules.legs, candle, firedLegs)
+        if (leg) {
+          trigger = { side: legSide(leg), qty: leg.qty }
+          firedLeg = leg
+        }
+      } else if (rules.legs?.length) {
+        if (evaluateEntrySignal(rules, frame)) {
+          const leg = rules.legs.find((l) => l.active)
+          trigger = {
+            side: leg ? legSide(leg) : rules.direction.side === 'long' ? 'LONG' : 'SHORT',
+            qty: leg ? leg.qty : rules.risk.quantity,
+          }
+        }
+      } else if (evaluateEntrySignal(rules, frame)) {
+        trigger = { side: rules.direction.side === 'long' ? 'LONG' : 'SHORT', qty: rules.risk.quantity }
+      }
+
+      if (trigger && !pastCutoff && underTradeLimit) {
+        const entrySide: 'buy' | 'sell' = trigger.side === 'LONG' ? 'buy' : 'sell'
         const fill = slippageAdjust(candle.close, config.slippagePercent, entrySide)
 
         // Capital-allocation % enforcement (spec §3.4 step 4) — skip if notional exceeds the cap.
         if (rules.risk.capitalAllocationPercent != null) {
-          const notional = fill * rules.risk.quantity
+          const notional = fill * trigger.qty
           const cap = (capital * rules.risk.capitalAllocationPercent) / 100
           if (notional > cap) {
             skippedSignals++
@@ -367,10 +393,10 @@ export function runBacktestCore(input: {
           }
         }
 
-        const risk = initialStopAndTarget(rules, fill, runtime, side)
+        const risk = initialStopAndTarget(rules, fill, runtime, trigger.side)
         position = {
-          side,
-          quantity: rules.risk.quantity,
+          side: trigger.side,
+          quantity: trigger.qty,
           entryPrice: fill,
           entryTime: candle.time,
           stopLoss: risk.stopLoss,
@@ -378,12 +404,13 @@ export function runBacktestCore(input: {
           target: risk.target,
           trailDistance: risk.trailDistance,
           peakPrice: fill, // best favorable price "since entry" starts at the fill itself
-          entryFee: feeFor(fill * rules.risk.quantity, config),
+          entryFee: feeFor(fill * trigger.qty, config),
           entryBarIndex: i,
           barsHeld: 0,
         }
+        if (firedLeg) markLegFired(firedLeg, candle, firedLegs)
         tradesPerDay.set(dayKey, tradesToday + 1)
-      } else {
+      } else if (trigger && (pastCutoff || !underTradeLimit)) {
         skippedSignals++
       }
     }

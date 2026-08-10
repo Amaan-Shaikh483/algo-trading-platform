@@ -1,5 +1,6 @@
 import { Plus } from 'lucide-react'
 import { TextInput } from '../../components/ui'
+import InstrumentSearch from '../../components/InstrumentSearch'
 import OperandEditor from '../../components/OperandEditor'
 import { OPERATORS } from '@algo/rule-schema'
 import type { Condition, Operator } from '@algo/rule-schema'
@@ -35,7 +36,17 @@ function Field({ label, required, children }: { label: string; required?: boolea
 
 // ── Underlying Selection ─────────────────────────────────────────────────────
 
-function UnderlyingSection({ value, onChange }: { value: Underlying; onChange: (v: Underlying) => void }) {
+function UnderlyingSection({
+  value,
+  instrument,
+  onTypeChange,
+  onInstrumentChange,
+}: {
+  value: Underlying
+  instrument: BuilderState['underlyingInstrument']
+  onTypeChange: (v: Underlying) => void
+  onInstrumentChange: (v: BuilderState['underlyingInstrument']) => void
+}) {
   return (
     <SectionCard title="Underlying Selection">
       <Field label="Underlying" required>
@@ -44,7 +55,7 @@ function UnderlyingSection({ value, onChange }: { value: Underlying; onChange: (
             <button
               key={u}
               type="button"
-              onClick={() => onChange(u)}
+              onClick={() => onTypeChange(u)}
               className={`rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors ${
                 value === u ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
               }`}
@@ -54,6 +65,28 @@ function UnderlyingSection({ value, onChange }: { value: Underlying; onChange: (
           ))}
         </div>
         <p className="mt-1.5 text-xs text-gray-400">Used for strike price calculations</p>
+      </Field>
+
+      <Field label="Underlying Instrument" required>
+        {instrument ? (
+          <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5">
+            <span className="text-sm font-medium text-gray-900">
+              {instrument.symbol} <span className="ml-2 text-xs text-gray-400">{instrument.exchange}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => onInstrumentChange(null)}
+              className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+            >
+              Change
+            </button>
+          </div>
+        ) : (
+          <InstrumentSearch
+            placeholder="Search underlying (e.g. SBIN, NIFTY, RELIANCE)…"
+            onSelect={(hit) => onInstrumentChange(hit)}
+          />
+        )}
       </Field>
     </SectionCard>
   )
@@ -366,7 +399,12 @@ export default function OptionIndicatorForm({ state, patch }: Props) {
 
   return (
     <div className="space-y-5">
-      <UnderlyingSection value={state.underlying} onChange={(underlying) => patch({ underlying })} />
+      <UnderlyingSection
+        value={state.underlying}
+        instrument={state.underlyingInstrument}
+        onTypeChange={(underlying) => patch({ underlying })}
+        onInstrumentChange={(underlyingInstrument) => patch({ underlyingInstrument })}
+      />
 
       <SectionCard title="Order Type">
         <div className="flex flex-wrap gap-3">

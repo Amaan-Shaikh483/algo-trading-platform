@@ -1,4 +1,4 @@
-import type { StrategyRules } from '@algo/rule-schema'
+import type { StrategyRuleLeg, StrategyRules } from '@algo/rule-schema'
 import { validateStrategyRules } from '@algo/rule-schema'
 import type { BrokerAdapter, Candle } from '../brokers/types'
 import type { PositionRow, StrategyRow } from '../../supabase/types'
@@ -6,6 +6,7 @@ import { logger } from '../../lib/logger'
 import { notify } from '../userEvents'
 import { IndicatorRuntime, collectIndicatorSpecs, hhmmToMinutes, istDayKey, istMinutesOfDay } from '../engine/indicatorEngine'
 import { evaluateEntrySignal } from '../engine/ruleEvaluator'
+import { hasTimeTriggeredLegs, legSide, markLegFired, pickScheduledLeg } from '../engine/timeTriggers'
 import { initialStopAndTarget, updateTrailing } from '../engine/backtestEngine'
 import { recordClosedTrade } from '../risk/riskManager'
 import { bucketStartFor, TIMEFRAME_MINUTES } from './candleAggregator'
@@ -61,6 +62,7 @@ export class StrategyRuntime {
   private exitRetryNotBefore = 0
   private pendingExitReason: LiveExitReason | null = null
   private stopped = false
+  private firedLegs = new Set<string>()
 
   private constructor(
     private readonly strategy: StrategyRow,
@@ -183,6 +185,7 @@ export class StrategyRuntime {
     if (dayKey !== this.tradesDayKey) {
       this.tradesDayKey = dayKey
       this.tradesToday = 0
+      this.firedLegs = new Set<string>() // fresh time-trigger schedule each IST day
     }
 
     // ── Position management (mirror of runBacktestCore's bar handling) ──
@@ -229,8 +232,29 @@ export class StrategyRuntime {
     if (fresh && !this.position && !this.inflight) {
       const pastCutoff = this.timeSqMinutes != null && istMinutesOfDay(candle.time) >= this.timeSqMinutes
       const underTradeLimit = this.tradesToday < this.rules.risk.maxTradesPerDay
-      if (!pastCutoff && underTradeLimit && evaluateEntrySignal(this.rules, { current: candle, previous: this.previousCandle, runtime: this.indicatorRt })) {
-        await this.requestEntry(candle)
+
+      // Resolve entry intent (mirrors runBacktestCore): time-triggered legs,
+      // leg-defined signal entries, or classic direction-based signal entry.
+      let leg: StrategyRuleLeg | undefined
+      let shouldEnter = false
+
+      if (hasTimeTriggeredLegs(this.rules.legs)) {
+        const scheduled = pickScheduledLeg(this.rules.legs, candle, this.firedLegs)
+        if (scheduled) {
+          leg = scheduled
+          shouldEnter = true
+        }
+      } else if (this.rules.legs?.length) {
+        if (evaluateEntrySignal(this.rules, { current: candle, previous: this.previousCandle, runtime: this.indicatorRt })) {
+          leg = this.rules.legs.find((l) => l.active)
+          shouldEnter = true
+        }
+      } else if (evaluateEntrySignal(this.rules, { current: candle, previous: this.previousCandle, runtime: this.indicatorRt })) {
+        shouldEnter = true
+      }
+
+      if (shouldEnter && !pastCutoff && underTradeLimit) {
+        await this.requestEntry(candle, leg)
       }
     }
 
@@ -283,10 +307,10 @@ export class StrategyRuntime {
 
   // ── Internals ──
 
-  private async requestEntry(candle: Candle): Promise<void> {
+  private async requestEntry(candle: Candle, leg?: StrategyRuleLeg): Promise<void> {
     this.inflight = true
-    const side = this.rules.direction.side === 'long' ? 'LONG' : 'SHORT'
-    const quantity = this.rules.risk.quantity
+    const side = leg ? legSide(leg) : this.rules.direction.side === 'long' ? 'LONG' : 'SHORT'
+    const quantity = leg ? leg.qty : this.rules.risk.quantity
     const approxPrice = candle.close
     try {
       if (this.mode === 'live' && this.rules.risk.capitalAllocationPercent != null && this.deps.availableMarginFor) {
@@ -319,6 +343,7 @@ export class StrategyRuntime {
         ...(adapter ? { liveAdapter: adapter } : {}),
       })
       await this.handleEntryOutcome(outcome, candle, side, quantity)
+      if (leg && this.position) markLegFired(leg, candle, this.firedLegs)
     } catch (err) {
       logger.error('entry intent failed', { strategyId: this.id, error: (err as Error).message })
       await notify(this.userId, 'strategy_error', `Strategy runtime error: ${this.name}`, (err as Error).message)
