@@ -1,5 +1,6 @@
 import { Plus } from 'lucide-react'
 import { TextInput } from '../../components/ui'
+import InstrumentSearch from '../../components/InstrumentSearch'
 import OperandEditor from '../../components/OperandEditor'
 import { OPERATORS } from '@algo/rule-schema'
 import type { Condition, Operator } from '@algo/rule-schema'
@@ -35,7 +36,17 @@ function Field({ label, required, children }: { label: string; required?: boolea
 
 // ── Underlying Selection ─────────────────────────────────────────────────────
 
-function UnderlyingSection({ value, onChange }: { value: Underlying; onChange: (v: Underlying) => void }) {
+function UnderlyingSection({
+  value,
+  instrument,
+  onTypeChange,
+  onInstrumentChange,
+}: {
+  value: Underlying
+  instrument: BuilderState['underlyingInstrument']
+  onTypeChange: (v: Underlying) => void
+  onInstrumentChange: (v: BuilderState['underlyingInstrument']) => void
+}) {
   return (
     <SectionCard title="Underlying Selection">
       <Field label="Underlying" required>
@@ -44,7 +55,7 @@ function UnderlyingSection({ value, onChange }: { value: Underlying; onChange: (
             <button
               key={u}
               type="button"
-              onClick={() => onChange(u)}
+              onClick={() => onTypeChange(u)}
               className={`rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors ${
                 value === u ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
               }`}
@@ -55,6 +66,28 @@ function UnderlyingSection({ value, onChange }: { value: Underlying; onChange: (
         </div>
         <p className="mt-1.5 text-xs text-gray-400">Used for strike price calculations</p>
       </Field>
+
+      <Field label="Underlying Instrument" required>
+        {instrument ? (
+          <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5">
+            <span className="text-sm font-medium text-gray-900">
+              {instrument.symbol} <span className="ml-2 text-xs text-gray-400">{instrument.exchange}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => onInstrumentChange(null)}
+              className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+            >
+              Change
+            </button>
+          </div>
+        ) : (
+          <InstrumentSearch
+            placeholder="Search underlying (e.g. SBIN, NIFTY, RELIANCE)…"
+            onSelect={(hit) => onInstrumentChange(hit)}
+          />
+        )}
+      </Field>
     </SectionCard>
   )
 }
@@ -64,9 +97,11 @@ function UnderlyingSection({ value, onChange }: { value: Underlying; onChange: (
 function StrategyLegsSection({
   legs,
   onChange,
+  showEntryTime = false,
 }: {
   legs: BuilderState['legs']
   onChange: (legs: BuilderState['legs']) => void
+  showEntryTime?: boolean
 }) {
   const updateLeg = (id: string, partial: Partial<BuilderState['legs'][0]>) => {
     onChange(legs.map((l) => (l.id === id ? { ...l, ...partial } : l)))
@@ -91,6 +126,7 @@ function StrategyLegsSection({
             onUpdate={(partial) => updateLeg(leg.id, partial)}
             onRemove={() => removeLeg(leg.id)}
             canRemove={legs.length > 1}
+            showEntryTime={showEntryTime}
           />
         ))}
         <button
@@ -100,6 +136,119 @@ function StrategyLegsSection({
         >
           <Plus size={16} /> Add Leg
         </button>
+      </div>
+    </SectionCard>
+  )
+}
+
+// ── Entry Conditions (Long / Short) Section ─────────────────────────────────
+
+function EntryConditionsSection({
+  longConditions,
+  shortConditions,
+  onLongChange,
+  onShortChange,
+}: {
+  longConditions: Condition[]
+  shortConditions: Condition[]
+  onLongChange: (v: Condition[]) => void
+  onShortChange: (v: Condition[]) => void
+}) {
+  const updateCondition = (conditions: Condition[], id: string, partial: Partial<Condition>) =>
+    conditions.map((c) => (c.id === id ? { ...c, ...partial } : c))
+
+  return (
+    <SectionCard title="Entry Conditions">
+      <div className="space-y-6">
+        {/* Long Entry */}
+        <div>
+          <div className="mb-3 flex items-center gap-2">
+            <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-500" />
+            <h4 className="text-sm font-semibold text-emerald-700">Long Entry</h4>
+          </div>
+          <div className="space-y-3">
+            {longConditions.map((c) => (
+              <div key={c.id} className="rounded-xl border border-gray-200 bg-white p-3">
+                <div className="grid items-start gap-3 sm:grid-cols-[1fr_auto_1fr]">
+                  <OperandEditor value={c.left} allowValue={false} onChange={(left) => onLongChange(updateCondition(longConditions, c.id, { left }))} />
+                  <select
+                    className="rounded-lg border border-gray-200 bg-gray-50/60 px-2.5 py-2 text-sm font-medium focus:border-brand-400 focus:bg-white focus:outline-none sm:mt-2"
+                    value={c.operator}
+                    onChange={(e) => onLongChange(updateCondition(longConditions, c.id, { operator: e.target.value as Operator }))}
+                  >
+                    {OPERATORS.map((o) => (
+                      <option key={o.key} value={o.key}>{o.label}</option>
+                    ))}
+                  </select>
+                  <OperandEditor value={c.right} allowValue onChange={(right) => onLongChange(updateCondition(longConditions, c.id, { right }))} />
+                </div>
+                <div className="mt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => onLongChange(longConditions.filter((x) => x.id !== c.id))}
+                    className="rounded-lg p-1.5 text-gray-300 hover:bg-red-50 hover:text-red-500"
+                  >
+                    <Plus size={15} className="rotate-45" />
+                  </button>
+                </div>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => onLongChange([...longConditions, newCondition()])}
+              className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-emerald-200 py-3 text-sm font-semibold text-emerald-500 transition-colors hover:border-emerald-300 hover:text-emerald-600"
+            >
+              <Plus size={16} /> Add Long Entry Condition
+            </button>
+          </div>
+        </div>
+
+        {/* Short Entry */}
+        <div>
+          <div className="mb-3 flex items-center gap-2">
+            <span className="inline-block h-2.5 w-2.5 rounded-full bg-red-500" />
+            <h4 className="text-sm font-semibold text-red-700">Short Entry</h4>
+          </div>
+          <div className="space-y-3">
+            {shortConditions.map((c) => (
+              <div key={c.id} className="rounded-xl border border-gray-200 bg-white p-3">
+                <div className="grid items-start gap-3 sm:grid-cols-[1fr_auto_1fr]">
+                  <OperandEditor value={c.left} allowValue={false} onChange={(left) => onShortChange(updateCondition(shortConditions, c.id, { left }))} />
+                  <select
+                    className="rounded-lg border border-gray-200 bg-gray-50/60 px-2.5 py-2 text-sm font-medium focus:border-brand-400 focus:bg-white focus:outline-none sm:mt-2"
+                    value={c.operator}
+                    onChange={(e) => onShortChange(updateCondition(shortConditions, c.id, { operator: e.target.value as Operator }))}
+                  >
+                    {OPERATORS.map((o) => (
+                      <option key={o.key} value={o.key}>{o.label}</option>
+                    ))}
+                  </select>
+                  <OperandEditor value={c.right} allowValue onChange={(right) => onShortChange(updateCondition(shortConditions, c.id, { right }))} />
+                </div>
+                <div className="mt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => onShortChange(shortConditions.filter((x) => x.id !== c.id))}
+                    className="rounded-lg p-1.5 text-gray-300 hover:bg-red-50 hover:text-red-500"
+                  >
+                    <Plus size={15} className="rotate-45" />
+                  </button>
+                </div>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => onShortChange([...shortConditions, newCondition()])}
+              className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-red-200 py-3 text-sm font-semibold text-red-500 transition-colors hover:border-red-300 hover:text-red-600"
+            >
+              <Plus size={16} /> Add Short Entry Condition
+            </button>
+          </div>
+        </div>
+
+        {longConditions.length === 0 && shortConditions.length === 0 && (
+          <p className="text-xs text-red-500">Add at least one Long or Short entry condition</p>
+        )}
       </div>
     </SectionCard>
   )
@@ -250,7 +399,12 @@ export default function OptionIndicatorForm({ state, patch }: Props) {
 
   return (
     <div className="space-y-5">
-      <UnderlyingSection value={state.underlying} onChange={(underlying) => patch({ underlying })} />
+      <UnderlyingSection
+        value={state.underlying}
+        instrument={state.underlyingInstrument}
+        onTypeChange={(underlying) => patch({ underlying })}
+        onInstrumentChange={(underlyingInstrument) => patch({ underlyingInstrument })}
+      />
 
       <SectionCard title="Order Type">
         <div className="flex flex-wrap gap-3">
@@ -296,6 +450,13 @@ export default function OptionIndicatorForm({ state, patch }: Props) {
       </SectionCard>
 
       <StrategyLegsSection legs={state.legs} onChange={(legs) => patch({ legs })} />
+
+      <EntryConditionsSection
+        longConditions={state.longEntryConditions}
+        shortConditions={state.shortEntryConditions}
+        onLongChange={(longEntryConditions) => patch({ longEntryConditions })}
+        onShortChange={(shortEntryConditions) => patch({ shortEntryConditions })}
+      />
 
       <ExitConditionsSection
         enabled={state.exitConditionsEnabled}

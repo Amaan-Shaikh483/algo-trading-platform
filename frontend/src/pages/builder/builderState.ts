@@ -1,9 +1,11 @@
 import { RULE_SCHEMA_VERSION, defaultRules, newConditionId } from '@algo/rule-schema'
 import type {
   Condition,
+  ConditionGroup,
   OrderType,
   ProductType,
   Segment,
+  StrategyRuleLeg,
   StrategyRules,
   Timeframe,
 } from '@algo/rule-schema'
@@ -73,6 +75,8 @@ export interface OptionLeg {
   id: string
   legNumber: number
   condition: LegCondition
+  /** Time-based trigger (option-time). HH:mm 24h IST; optional for indicator legs. */
+  entryTime?: string
   strikeCriteria: string
   strikeType: string
   qty: number
@@ -116,6 +120,7 @@ export interface BuilderState {
 
   // Option Trading fields
   underlying: Underlying
+  underlyingInstrument: InstrumentHit | null
   optOrderType: OrderTypeNew
   legs: OptionLeg[]
 
@@ -180,6 +185,7 @@ export function newOptionLeg(legNumber: number): OptionLeg {
     id: newLegId(),
     legNumber,
     condition: 'LONG',
+    entryTime: '09:20',
     strikeCriteria: 'ATM',
     strikeType: 'ATM',
     qty: 1,
@@ -219,6 +225,7 @@ export function initialBuilderState(): BuilderState {
 
     // Option Trading
     underlying: 'Spot',
+    underlyingInstrument: null,
     optOrderType: 'MIS',
     legs: [newOptionLeg(1)],
 
@@ -281,9 +288,65 @@ function toProductType(ot: OrderTypeNew): ProductType {
   return 'BTST'
 }
 
-/** Assemble the persistable rule tree for Stocks & Futures. */
+function groupOf(conditions: Condition[]): ConditionGroup | undefined {
+  return conditions.length > 0 ? { combinator: 'and', conditions } : undefined
+}
+
+/** Serialize a builder leg into the schema leg shape (drops UI-only id). */
+export function serializeLeg(leg: OptionLeg): StrategyRuleLeg {
+  return {
+    legNumber: leg.legNumber,
+    condition: leg.condition,
+    entryTime: leg.entryTime,
+    strikeCriteria: leg.strikeCriteria,
+    strikeType: leg.strikeType,
+    qty: leg.qty,
+    position: leg.position,
+    optionType: leg.optionType,
+    expiry: leg.expiry,
+    slType: leg.slType,
+    slValue: leg.slValue,
+    tpType: leg.tpType,
+    tpValue: leg.tpValue,
+    trailSlType: leg.trailSlType,
+    trailSlValue: leg.trailSlValue,
+    priceMovement: leg.priceMovement,
+    tradingValue: leg.tradingValue,
+    prePunchSl: leg.prePunchSl,
+    active: leg.active,
+  }
+}
+
+/** Rehydrate builder legs from a saved schema's legs array. */
+export function hydrateLegs(legs?: StrategyRuleLeg[]): OptionLeg[] {
+  if (!legs || legs.length === 0) return []
+  return legs.map((l) => ({
+    id: newLegId(),
+    legNumber: l.legNumber,
+    condition: l.condition,
+    entryTime: l.entryTime,
+    strikeCriteria: l.strikeCriteria,
+    strikeType: l.strikeType,
+    qty: l.qty,
+    position: l.position,
+    optionType: l.optionType,
+    expiry: l.expiry,
+    slType: l.slType,
+    slValue: l.slValue,
+    tpType: l.tpType,
+    tpValue: l.tpValue,
+    trailSlType: l.trailSlType,
+    trailSlValue: l.trailSlValue,
+    priceMovement: l.priceMovement,
+    tradingValue: l.tradingValue,
+    prePunchSl: l.prePunchSl,
+    active: l.active,
+  }))
+}
+
+/** Assemble the persistable rule tree for all strategy types. */
 export function toRules(state: BuilderState): StrategyRules {
-  // For stocks-futures, merge long+short conditions
+  // Merge long+short conditions into the engine-consumed entryConditions group.
   const allConditions = [...state.longEntryConditions, ...state.shortEntryConditions]
   const exitRules = state.exit
 
@@ -292,6 +355,9 @@ export function toRules(state: BuilderState): StrategyRules {
     direction: { side: state.direction },
     entry: { orderType: state.orderType, productType: toProductType(state.sfOrderType) },
     entryConditions: { combinator: 'and', conditions: allConditions.length > 0 ? allConditions : state.entryConditions },
+    longEntryConditions: groupOf(state.longEntryConditions),
+    shortEntryConditions: groupOf(state.shortEntryConditions),
+    legs: state.legs.length > 0 ? state.legs.map(serializeLeg) : undefined,
     exit: {
       ...(exitRules.slEnabled
         ? {
@@ -351,6 +417,17 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
         strike: null,
       },
     ],
+    underlyingInstrument: {
+      token: row.symbol_token,
+      symbol: row.instrument,
+      name: null,
+      exchange: row.exchange,
+      segment: row.segment,
+      lotsize: null,
+      tick_size: null,
+      expiry: null,
+      strike: null,
+    },
     segment: row.segment,
     timeframe: row.timeframe as Timeframe,
     interval: row.timeframe,
@@ -360,8 +437,9 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
     sfOrderType: r.entry.productType === 'INTRADAY' ? 'MIS' : r.entry.productType === 'DELIVERY' ? 'CNC' : 'BTST',
     combinator: r.entryConditions.combinator,
     entryConditions: r.entryConditions.conditions,
-    longEntryConditions: r.direction.side === 'long' ? r.entryConditions.conditions : [],
-    shortEntryConditions: r.direction.side === 'short' ? r.entryConditions.conditions : [],
+    longEntryConditions: r.longEntryConditions?.conditions ?? (r.direction.side === 'long' ? r.entryConditions.conditions : []),
+    shortEntryConditions: r.shortEntryConditions?.conditions ?? (r.direction.side === 'short' ? r.entryConditions.conditions : []),
+    legs: hydrateLegs(r.legs),
     exit: {
       slEnabled: r.exit.stopLoss != null,
       slType: r.exit.stopLoss?.type ?? 'points',

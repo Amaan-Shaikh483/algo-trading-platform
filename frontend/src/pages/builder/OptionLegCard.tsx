@@ -13,9 +13,11 @@ interface Props {
   onUpdate: (partial: Partial<OptionLeg>) => void
   onRemove: () => void
   canRemove: boolean
+  /** Show the time-based entry trigger input (option-time strategy). */
+  showEntryTime?: boolean
 }
 
-export default function OptionLegCard({ leg, onUpdate, onRemove, canRemove }: Props) {
+export default function OptionLegCard({ leg, onUpdate, onRemove, canRemove, showEntryTime = false }: Props) {
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
       {/* Header */}
@@ -70,6 +72,22 @@ export default function OptionLegCard({ leg, onUpdate, onRemove, canRemove }: Pr
           </button>
         ))}
       </div>
+
+      {/* Time-based entry trigger */}
+      {showEntryTime && (
+        <div className="mb-3 rounded-xl border border-brand-100 bg-brand-50/50 p-3">
+          <span className="mb-1.5 block text-[11px] font-medium text-brand-700">Entry Time (trigger)</span>
+          <input
+            type="time"
+            value={leg.entryTime ?? ''}
+            onChange={(e) => onUpdate({ entryTime: e.target.value })}
+            className="w-full rounded-lg border border-brand-200 bg-white px-3 py-2 text-sm focus:border-brand-400 focus:outline-none"
+          />
+          <p className="mt-1 text-[11px] text-brand-600/70">
+            Trade executes at this time. Leave blank to disable the time trigger for this leg.
+          </p>
+        </div>
+      )}
 
       {/* Strike Configuration */}
       <div className="mb-3 grid grid-cols-2 gap-3">

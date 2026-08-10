@@ -15,7 +15,7 @@
  */
 import { getServiceClient } from './supabase/client'
 import { validateStrategyRules } from '@algo/rule-schema'
-import type { Condition, StrategyRules } from '@algo/rule-schema'
+import type { Condition, StrategyRuleLeg, StrategyRules } from '@algo/rule-schema'
 import { RULE_SCHEMA_VERSION } from '@algo/rule-schema'
 
 const email = process.argv[2]
@@ -59,6 +59,23 @@ function rules(partial: {
   }
 }
 
+/** Build a time-triggered option-leg (option-time strategy) sample. */
+function timeLegRules(legs: StrategyRuleLeg[], quantity: number, maxTradesPerDay: number, slPercent: number, rr: number, squareOff: string): StrategyRules {
+  return {
+    version: RULE_SCHEMA_VERSION,
+    direction: { side: 'long' },
+    entry: { orderType: 'MARKET', productType: 'INTRADAY' },
+    entryConditions: { combinator: 'and', conditions: [] },
+    legs,
+    exit: {
+      stopLoss: { type: 'percent', value: slPercent },
+      target: { type: 'rr_multiple', value: rr },
+      timeSquareOff: { time: squareOff },
+    },
+    risk: { quantity, maxConcurrentPositions: 1, maxTradesPerDay },
+  }
+}
+
 interface SampleSpec {
   name: string
   description: string
@@ -95,6 +112,23 @@ const SAMPLES: SampleSpec[] = [
       rr: 2,
       trailingPercent: 0.5,
     }),
+  },
+  {
+    name: 'Sample · NIFTY Time-Tagged Option Legs (5m) — backtest study',
+    description: 'Educational sample — Option Trading (Time Based) with two time-triggered legs on the NIFTY 50 index: BUY CE at 09:20 and SELL CE at 10:40, each day. 0.4% SL, 2R target, square-off 15:10. v1 engine trades the underlying series (BUY→LONG, SELL→SHORT); real option execution needs the option chain.',
+    instrumentQuery: { symbol: 'Nifty 50', exchange: 'NSE' },
+    timeframe: '5m',
+    rules: timeLegRules(
+      [
+        { legNumber: 1, condition: 'LONG', entryTime: '09:20', strikeCriteria: 'ATM', strikeType: 'ATM', qty: 1, position: 'BUY', optionType: 'CALL', expiry: 'WEEKLY', slType: 'SL%', slValue: '0.4', tpType: 'TP%', tpValue: '0.8', trailSlType: '%', trailSlValue: '0', priceMovement: '0', tradingValue: '0', prePunchSl: false, active: true },
+        { legNumber: 2, condition: 'SHORT', entryTime: '10:40', strikeCriteria: 'ATM', strikeType: 'ATM', qty: 1, position: 'SELL', optionType: 'CALL', expiry: 'WEEKLY', slType: 'SL%', slValue: '0.4', tpType: 'TP%', tpValue: '0.8', trailSlType: '%', trailSlValue: '0', priceMovement: '0', tradingValue: '0', prePunchSl: false, active: true },
+      ],
+      1, // index units — ~₹25k notional, fits ₹1L demo capital
+      2,
+      0.4,
+      2,
+      '15:10',
+    ),
   },
   {
     name: 'Sample · NIFTY 50 Index EMA 20/50 (5m) — backtest study',

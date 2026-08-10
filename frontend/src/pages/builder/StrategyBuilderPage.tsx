@@ -35,9 +35,18 @@ function validateBuilderState(state: BuilderState): string[] {
     }
   }
 
+  if (state.strategyType === 'option-indicator' || state.strategyType === 'option-time') {
+    if (!state.underlyingInstrument) {
+      errors.push('Select an underlying instrument')
+    }
+  }
+
   if (state.strategyType === 'option-indicator') {
     if (state.legs.length === 0) {
       errors.push('Add at least one strategy leg')
+    }
+    if (state.longEntryConditions.length === 0 && state.shortEntryConditions.length === 0) {
+      errors.push('Add at least one Long or Short entry condition')
     }
     if (state.startTime >= state.squareOffTime) {
       errors.push('Start time must be before Square Off time')
@@ -45,6 +54,12 @@ function validateBuilderState(state: BuilderState): string[] {
   }
 
   if (state.strategyType === 'option-time') {
+    if (state.legs.length === 0) {
+      errors.push('Add at least one strategy leg')
+    }
+    if (state.legs.length > 0 && state.legs.every((l) => !l.entryTime)) {
+      errors.push('Set an Entry Time on at least one leg')
+    }
     if (state.startTime >= state.squareOffTime) {
       errors.push('Start time must be before Square Off time')
     }
@@ -94,8 +109,11 @@ export default function StrategyBuilderPage() {
     setSaving(true)
     setError(null)
     try {
-      // For stocks-futures, use the first instrument as the primary
-      const primaryInstrument = state.instruments[0]
+      // For option strategies the underlying instrument is the tracked symbol;
+      // for stocks-futures use the first selected instrument.
+      const primaryInstrument = state.strategyType === 'option-indicator' || state.strategyType === 'option-time'
+        ? state.underlyingInstrument
+        : state.instruments[0]
       const payload = {
         name: state.strategyName.trim(),
         description: '',

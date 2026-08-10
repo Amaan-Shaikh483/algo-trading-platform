@@ -1,12 +1,15 @@
 import { Plus } from 'lucide-react'
 import { TextInput } from '../../components/ui'
+import InstrumentSearch from '../../components/InstrumentSearch'
 import OperandEditor from '../../components/OperandEditor'
 import { OPERATORS } from '@algo/rule-schema'
 import type { Operator } from '@algo/rule-schema'
+import OptionLegCard from './OptionLegCard'
 import {
   ORDER_TYPE_OPTIONS,
   PROFIT_TRAILING_OPTIONS,
   newCondition,
+  newOptionLeg,
 } from './builderState'
 import type { BuilderState, Underlying } from './builderState'
 
@@ -28,6 +31,60 @@ function Field({ label, required, children }: { label: string; required?: boolea
       </span>
       {children}
     </label>
+  )
+}
+
+// ── Strategy Legs Section (time-triggered) ──────────────────────────────────
+
+function StrategyLegsSection({
+  legs,
+  onChange,
+}: {
+  legs: BuilderState['legs']
+  onChange: (legs: BuilderState['legs']) => void
+}) {
+  const updateLeg = (id: string, partial: Partial<BuilderState['legs'][0]>) => {
+    onChange(legs.map((l) => (l.id === id ? { ...l, ...partial } : l)))
+  }
+
+  const removeLeg = (id: string) => {
+    if (legs.length <= 1) return
+    onChange(legs.filter((l) => l.id !== id))
+  }
+
+  const addLeg = () => {
+    onChange([...legs, newOptionLeg(legs.length + 1)])
+  }
+
+  return (
+    <SectionCard title="Strategy Legs (Time-Triggered)">
+      <div className="space-y-4">
+        <div className="rounded-xl border border-brand-100 bg-brand-50/50 px-4 py-3 text-sm text-brand-700">
+          <p className="font-semibold">Time-based option legs</p>
+          <p className="mt-1 text-xs text-brand-600">
+            Each leg executes at its Entry Time. Pick the action (BUY/SELL), option type (CE/PE), strike and
+            expiry for every leg. Legs without an entry time stay inactive for automatic entry.
+          </p>
+        </div>
+        {legs.map((leg) => (
+          <OptionLegCard
+            key={leg.id}
+            leg={leg}
+            onUpdate={(partial) => updateLeg(leg.id, partial)}
+            onRemove={() => removeLeg(leg.id)}
+            canRemove={legs.length > 1}
+            showEntryTime
+          />
+        ))}
+        <button
+          type="button"
+          onClick={addLeg}
+          className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-gray-200 py-3 text-sm font-semibold text-gray-400 transition-colors hover:border-brand-300 hover:text-brand-600"
+        >
+          <Plus size={16} /> Add Leg
+        </button>
+      </div>
+    </SectionCard>
   )
 }
 
@@ -71,6 +128,30 @@ export default function OptionTimeForm({ state, patch }: Props) {
               </button>
             ))}
           </div>
+          <p className="mt-1.5 text-xs text-gray-400">Used for strike price calculations</p>
+        </Field>
+
+        <Field label="Underlying Instrument" required>
+          {state.underlyingInstrument ? (
+            <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5">
+              <span className="text-sm font-medium text-gray-900">
+                {state.underlyingInstrument.symbol}{' '}
+                <span className="ml-2 text-xs text-gray-400">{state.underlyingInstrument.exchange}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => patch({ underlyingInstrument: null })}
+                className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+              >
+                Change
+              </button>
+            </div>
+          ) : (
+            <InstrumentSearch
+              placeholder="Search underlying (e.g. SBIN, NIFTY, RELIANCE)…"
+              onSelect={(hit) => patch({ underlyingInstrument: hit })}
+            />
+          )}
         </Field>
       </SectionCard>
 
@@ -119,54 +200,8 @@ export default function OptionTimeForm({ state, patch }: Props) {
         </div>
       </SectionCard>
 
-      {/* Time-Based Entry Triggers */}
-      <SectionCard title="Time-Based Entry Triggers">
-        <div className="space-y-4">
-          <div className="rounded-xl border border-gray-100 bg-gray-50/50 p-4">
-            <p className="mb-3 text-xs font-medium text-gray-500">
-              Define time-based entry triggers. Trades will be executed at the specified times.
-            </p>
-            <div className="space-y-3">
-              {/* Time trigger rows - simplified for now */}
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <div>
-                  <span className="mb-1 block text-[11px] font-medium text-gray-500">Entry Time</span>
-                  <input
-                    type="time"
-                    defaultValue="09:20"
-                    className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2.5 text-sm focus:border-brand-400 focus:bg-white focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <span className="mb-1 block text-[11px] font-medium text-gray-500">Action</span>
-                  <select className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2.5 text-sm focus:border-brand-400 focus:bg-white focus:outline-none">
-                    <option>BUY CE</option>
-                    <option>BUY PE</option>
-                    <option>SELL CE</option>
-                    <option>SELL PE</option>
-                  </select>
-                </div>
-                <div>
-                  <span className="mb-1 block text-[11px] font-medium text-gray-500">Strike</span>
-                  <select className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2.5 text-sm focus:border-brand-400 focus:bg-white focus:outline-none">
-                    <option>ATM</option>
-                    <option>OTM 1</option>
-                    <option>OTM 2</option>
-                    <option>ITM 1</option>
-                    <option>ITM 2</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-            <button
-              type="button"
-              className="mt-3 flex items-center gap-2 text-sm font-semibold text-brand-600 hover:text-brand-700"
-            >
-              <Plus size={16} /> Add Time Trigger
-            </button>
-          </div>
-        </div>
-      </SectionCard>
+      {/* Strategy Legs (time-triggered) */}
+      <StrategyLegsSection legs={state.legs} onChange={(legs) => patch({ legs })} />
 
       {/* Exit Conditions */}
       <SectionCard title="Exit Conditions">
