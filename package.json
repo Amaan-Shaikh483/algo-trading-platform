@@ -1,0 +1,24 @@
+{
+  "name": "algo-trading-platform",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Full-stack algo trading platform (Angel One SmartAPI, Supabase, React)",
+  "workspaces": [
+    "frontend",
+    "backend",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:frontend": "npm run build -w @algo/rule-schema --if-present && npm run dev -w frontend",
+    "dev:backend": "npm run build -w @algo/rule-schema --if-present && npm run dev -w backend",
+    "build": "npm run build -w @algo/rule-schema --if-present && npm run build -w backend && npm run build -w frontend",
+    "typecheck": "npm run typecheck -w backend && npm run typecheck -w frontend",
+    "test": "npm run test -w backend",
+    "verify": "npm run verify:engine -w backend && npm run verify:live -w backend",
+    "build:schema": "npm run build -w @algo/rule-schema",
+    "postinstall": "npm run build -w @algo/rule-schema --if-present || true"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

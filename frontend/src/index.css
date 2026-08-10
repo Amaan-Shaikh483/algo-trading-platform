@@ -1,0 +1,19 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Poppins', var(--font-sans);
+
+  /* Brand blue (per the approved UI reference) */
+  --color-brand-50: #eef3ff;
+  --color-brand-100: #e1eaff;
+  --color-brand-200: #c6d6fe;
+  --color-brand-300: #a3bbfd;
+  --color-brand-400: #7a97fa;
+  --color-brand-500: #4f6ff0;
+  --color-brand-600: #2c54e8;
+  --color-brand-700: #2244c4;
+  --color-brand-800: #1f3a9e;
+  --color-brand-900: #1f3680;
+}

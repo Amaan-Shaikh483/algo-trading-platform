@@ -1,0 +1,39 @@
+{
+  "name": "backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "worker": "tsx src/worker.ts",
+    "diagnose": "tsx src/diagnose.ts",
+    "seed:samples": "tsx src/seedSamples.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "verify:engine": "npm run build && node scripts/verify-engine.mjs",
+    "verify:live": "npm run build && node scripts/verify-live.mjs"
+  },
+  "dependencies": {
+    "@algo/rule-schema": "*",
+    "@supabase/supabase-js": "^2.45.0",
+    "bottleneck": "^2.19.5",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "otplib": "^12.0.1",
+    "smartapi-javascript": "^1.0.27",
+    "technicalindicators": "^3.1.0",
+    "ws": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}
