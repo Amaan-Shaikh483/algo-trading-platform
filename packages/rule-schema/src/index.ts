@@ -22,7 +22,7 @@ export type Segment = (typeof SEGMENTS)[number]
 export const ORDER_TYPES = ['MARKET', 'LIMIT'] as const
 export type OrderType = (typeof ORDER_TYPES)[number]
 
-export const PRODUCT_TYPES = ['INTRADAY', 'DELIVERY', 'MARGIN'] as const
+export const PRODUCT_TYPES = ['INTRADAY', 'DELIVERY', 'MARGIN', 'BTST'] as const
 export type ProductType = (typeof PRODUCT_TYPES)[number]
 
 export const OPERATORS = [
