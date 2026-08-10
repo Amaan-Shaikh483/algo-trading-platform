@@ -87,6 +87,11 @@ export type StrategyRow = {
   timeframe: string
   rules: Json
   risk_settings: Json
+  /** Split long/short entry condition groups (mirrors rules.longEntryConditions). */
+  long_entry_conditions: Json | null
+  short_entry_conditions: Json | null
+  /** Option strategy legs (mirrors rules.legs). */
+  legs: Json | null
   mode: 'paper' | 'live'
   is_active: boolean
   version: number

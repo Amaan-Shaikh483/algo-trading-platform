@@ -217,6 +217,36 @@ export interface ConditionGroup {
   conditions: Condition[]
 }
 
+// ── Option strategy legs (spec: builder legs for option-time & option-indicator) ─
+
+export type LegCondition = 'LONG' | 'SHORT'
+export type OptionPosition = 'BUY' | 'SELL'
+export type OptionType = 'CALL' | 'PUT'
+export type ExpiryType = 'WEEKLY' | 'MONTHLY'
+
+export interface StrategyRuleLeg {
+  legNumber: number
+  condition: LegCondition
+  /** Time-based trigger (option-time). ISO-style "HH:mm" IST; optional for indicator legs. */
+  entryTime?: string
+  strikeCriteria: string
+  strikeType: string
+  qty: number
+  position: OptionPosition
+  optionType: OptionType
+  expiry: ExpiryType
+  slType: string
+  slValue: string
+  tpType: string
+  tpValue: string
+  trailSlType: string
+  trailSlValue: string
+  priceMovement: string
+  tradingValue: string
+  prePunchSl: boolean
+  active: boolean
+}
+
 // ── Exit & risk rules ────────────────────────────────────────────────────────
 
 export interface StopLossRule {
@@ -261,6 +291,11 @@ export interface StrategyRules {
   direction: TradeDirection
   entry: { orderType: OrderType; productType: ProductType }
   entryConditions: ConditionGroup
+  /** Optional split of entry conditions into long vs short signals (stocks-futures & option-indicator). */
+  longEntryConditions?: ConditionGroup
+  shortEntryConditions?: ConditionGroup
+  /** Option strategy legs (option-indicator & option-time). */
+  legs?: StrategyRuleLeg[]
   exit: ExitRules
   risk: RiskRules
 }
@@ -366,8 +401,8 @@ export function validateStrategyRules(rules: unknown): { valid: boolean; errors:
     errors.push("entryConditions.combinator must be 'and' or 'or'")
   }
   const conditions = group?.conditions ?? []
-  if (!Array.isArray(conditions) || conditions.length === 0) {
-    errors.push('at least one entry condition is required')
+  if (!Array.isArray(conditions)) {
+    errors.push('entryConditions.conditions must be an array')
   }
   conditions.forEach((c, i) => {
     const path = `condition ${i + 1}`
@@ -375,6 +410,50 @@ export function validateStrategyRules(rules: unknown): { valid: boolean; errors:
     validateOperand(c?.left, `${path} (left)`, errors, false)
     validateOperand(c?.right, `${path} (right)`, errors, true)
   })
+
+  // Split long/short entry groups (optional — used by stocks-futures & option-indicator)
+  const validateGroup = (g: ConditionGroup | undefined, name: string) => {
+    if (g == null) return
+    if (g.combinator !== 'and' && g.combinator !== 'or') errors.push(`${name}.combinator must be 'and' or 'or'`)
+    if (!Array.isArray(g.conditions)) {
+      errors.push(`${name}.conditions must be an array`)
+      return
+    }
+    g.conditions.forEach((c, i) => {
+      const path = `${name} condition ${i + 1}`
+      if (!OPERATOR_KEYS.includes(c?.operator)) errors.push(`${path}: invalid operator '${String(c?.operator)}'`)
+      validateOperand(c?.left, `${path} (left)`, errors, false)
+      validateOperand(c?.right, `${path} (right)`, errors, true)
+    })
+  }
+  validateGroup(r.longEntryConditions, 'longEntryConditions')
+  validateGroup(r.shortEntryConditions, 'shortEntryConditions')
+
+  // Option strategy legs (optional — option-indicator & option-time)
+  const legs = r.legs
+  if (legs != null) {
+    if (!Array.isArray(legs)) errors.push('legs must be an array')
+    else if (legs.length === 0) errors.push('at least one strategy leg is required when legs are provided')
+    else
+      legs.forEach((leg, i) => {
+        const p = `leg ${i + 1}`
+        if (leg.condition !== 'LONG' && leg.condition !== 'SHORT') errors.push(`${p}: condition must be LONG or SHORT`)
+        if (leg.entryTime != null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(leg.entryTime)) {
+          errors.push(`${p}: entryTime must be HH:mm (24h, IST)`)
+        }
+        if (leg.position !== 'BUY' && leg.position !== 'SELL') errors.push(`${p}: position must be BUY or SELL`)
+        if (leg.optionType !== 'CALL' && leg.optionType !== 'PUT') errors.push(`${p}: optionType must be CALL or PUT`)
+        if (leg.expiry !== 'WEEKLY' && leg.expiry !== 'MONTHLY') errors.push(`${p}: expiry must be WEEKLY or MONTHLY`)
+        if (!Number.isInteger(leg.qty) || leg.qty < 1) errors.push(`${p}: qty must be a positive integer`)
+      })
+
+    // Option strategies need at least a leg or an entry condition to be actionable.
+    if (conditions.length === 0 && legs.length === 0) {
+      errors.push('at least one entry condition or strategy leg is required')
+    }
+  } else if (conditions.length === 0) {
+    errors.push('at least one entry condition is required')
+  }
 
   const ex = r.exit ?? {}
   if (ex.stopLoss) {
@@ -460,5 +539,9 @@ export function summarizeRules(r: StrategyRules): string[] {
   if (ex.timeSquareOff) lines.push(`Time square-off: ${ex.timeSquareOff.time} IST`)
   if (ex.maxHoldingBars) lines.push(`Max holding: ${ex.maxHoldingBars} candles`)
   lines.push(`Qty: ${r.risk.quantity} · Max positions: ${r.risk.maxConcurrentPositions} · Max trades/day: ${r.risk.maxTradesPerDay}${r.risk.capitalAllocationPercent ? ` · Capital: ${r.risk.capitalAllocationPercent}%` : ''}`)
+  ;(r.legs ?? []).forEach((leg) => {
+    const action = `${leg.position === 'BUY' ? 'BUY' : 'SELL'} ${leg.optionType === 'CALL' ? 'CE' : 'PE'} @ ${leg.strikeType}`
+    lines.push(`Leg ${leg.legNumber} (${leg.condition})${leg.entryTime ? ` at ${leg.entryTime}` : ''}: ${action} qty ${leg.qty}${leg.active ? '' : ' (inactive)'}`)
+  })
   return lines
 }

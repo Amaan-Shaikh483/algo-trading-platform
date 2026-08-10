@@ -39,12 +39,21 @@ function validateBuilderState(state: BuilderState): string[] {
     if (state.legs.length === 0) {
       errors.push('Add at least one strategy leg')
     }
+    if (state.longEntryConditions.length === 0 && state.shortEntryConditions.length === 0) {
+      errors.push('Add at least one Long or Short entry condition')
+    }
     if (state.startTime >= state.squareOffTime) {
       errors.push('Start time must be before Square Off time')
     }
   }
 
   if (state.strategyType === 'option-time') {
+    if (state.legs.length === 0) {
+      errors.push('Add at least one strategy leg')
+    }
+    if (state.legs.length > 0 && state.legs.every((l) => !l.entryTime)) {
+      errors.push('Set an Entry Time on at least one leg')
+    }
     if (state.startTime >= state.squareOffTime) {
       errors.push('Start time must be before Square Off time')
     }

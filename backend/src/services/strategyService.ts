@@ -120,6 +120,9 @@ export async function createStrategy(userId: string, input: StrategyInput): Prom
       timeframe: input.timeframe,
       rules: rules as never,
       risk_settings: rules.risk as never,
+      long_entry_conditions: (rules.longEntryConditions as never) ?? null,
+      short_entry_conditions: (rules.shortEntryConditions as never) ?? null,
+      legs: (rules.legs as never) ?? null,
       mode: 'paper', // spec 3.7: new strategies ALWAYS default to paper
       is_active: false,
       version: RULE_SCHEMA_VERSION,
@@ -149,6 +152,9 @@ export async function updateStrategy(userId: string, id: string, input: Strategy
       timeframe: input.timeframe,
       rules: rules as never,
       risk_settings: rules.risk as never,
+      long_entry_conditions: (rules.longEntryConditions as never) ?? null,
+      short_entry_conditions: (rules.shortEntryConditions as never) ?? null,
+      legs: (rules.legs as never) ?? null,
       version: RULE_SCHEMA_VERSION,
     })
     .eq('id', id)
@@ -174,6 +180,9 @@ export async function cloneStrategy(userId: string, id: string): Promise<Strateg
       timeframe: source.timeframe,
       rules: source.rules as never,
       risk_settings: source.risk_settings as never,
+      long_entry_conditions: source.long_entry_conditions as never,
+      short_entry_conditions: source.short_entry_conditions as never,
+      legs: source.legs as never,
       mode: 'paper', // clones always restart in paper mode (spec 3.7 parity)
       is_active: false,
       version: source.version,
