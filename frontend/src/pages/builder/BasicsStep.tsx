@@ -21,8 +21,8 @@ export default function BasicsStep({ state, patch }: { state: BuilderState; patc
     <div className="space-y-5">
       <TextInput
         label="Strategy name"
-        value={state.name}
-        onChange={(e) => patch({ name: e.target.value })}
+        value={state.strategyName}
+        onChange={(e) => patch({ strategyName: e.target.value })}
         placeholder="e.g. 9/21 EMA Crossover — SBIN"
         autoFocus
       />
@@ -43,7 +43,7 @@ export default function BasicsStep({ state, patch }: { state: BuilderState; patc
             </button>
           </div>
         ) : (
-          <InstrumentSearch onSelect={(instrument) => patch({ instrument })} />
+          <InstrumentSearch onSelect={(instrument) => patch({ instrument, instruments: [instrument] })} />
         )}
       </div>
 
@@ -102,7 +102,7 @@ export default function BasicsStep({ state, patch }: { state: BuilderState; patc
           <select className={selectCls} value={state.productType} onChange={(e) => patch({ productType: e.target.value as ProductType })}>
             {PRODUCT_TYPES.map((t) => (
               <option key={t} value={t}>
-                {t === 'INTRADAY' ? 'Intraday (MIS)' : t === 'DELIVERY' ? 'Delivery (CNC)' : 'Margin'}
+                {t === 'INTRADAY' ? 'Intraday (MIS)' : t === 'DELIVERY' ? 'Delivery (CNC)' : t === 'BTST' ? 'Buy Today Sell Tomorrow' : 'Margin'}
               </option>
             ))}
           </select>

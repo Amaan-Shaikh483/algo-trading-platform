@@ -10,7 +10,141 @@ import type {
 import type { InstrumentHit } from '../../lib/instrumentApi'
 import type { StrategyRowView } from '../../lib/strategyApi'
 
-/** UI state for step 3 (numbers kept as strings for input control). */
+// ── Strategy Type ────────────────────────────────────────────────────────────
+
+export type StrategyType = 'stocks-futures' | 'option-indicator' | 'option-time'
+
+export const STRATEGY_TYPE_OPTIONS: { value: StrategyType; label: string }[] = [
+  { value: 'option-time', label: 'Option Trading-Time Based' },
+  { value: 'option-indicator', label: 'Option Trading-Indicator Based' },
+  { value: 'stocks-futures', label: 'Stocks & Futures -Indicator Based' },
+]
+
+// ── Stocks & Futures types ───────────────────────────────────────────────────
+
+export type OrderTypeNew = 'MIS' | 'CNC' | 'BTST'
+export type TransactionType = 'Both Side' | 'Only Long' | 'Only Short'
+export type ChartType = 'Candle' | 'Heikin Ashi'
+export type ProfitTrailing = 'No Trailing' | 'Lock Fix' | 'Trail' | 'Lock & Trail'
+
+export const ORDER_TYPE_OPTIONS: { value: OrderTypeNew; label: string; desc: string }[] = [
+  { value: 'MIS', label: 'MIS', desc: 'Intraday' },
+  { value: 'CNC', label: 'CNC', desc: 'Delivery' },
+  { value: 'BTST', label: 'BTST', desc: 'Buy Today Sell Tomorrow' },
+]
+
+export const TRANSACTION_TYPES: { value: TransactionType; label: string }[] = [
+  { value: 'Both Side', label: 'Both Side' },
+  { value: 'Only Long', label: 'Only Long' },
+  { value: 'Only Short', label: 'Only Short' },
+]
+
+export const CHART_TYPES: { value: ChartType; label: string }[] = [
+  { value: 'Candle', label: 'Candle' },
+  { value: 'Heikin Ashi', label: 'Heikin Ashi' },
+]
+
+export const INTERVAL_OPTIONS: { value: string; label: string }[] = [
+  { value: '1m', label: '1 min' },
+  { value: '3m', label: '3 min' },
+  { value: '5m', label: '5 min' },
+  { value: '10m', label: '10 min' },
+  { value: '15m', label: '15 min' },
+  { value: '30m', label: '30 min' },
+  { value: '1h', label: '1H' },
+]
+
+export const PROFIT_TRAILING_OPTIONS: ProfitTrailing[] = [
+  'No Trailing',
+  'Lock Fix',
+  'Trail',
+  'Lock & Trail',
+]
+
+// ── Option Trading types ─────────────────────────────────────────────────────
+
+export type Underlying = 'Spot' | 'Future'
+export type OptionPosition = 'BUY' | 'SELL'
+export type OptionType = 'CALL' | 'PUT'
+export type ExpiryType = 'WEEKLY' | 'MONTHLY'
+export type LegCondition = 'LONG' | 'SHORT'
+
+export interface OptionLeg {
+  id: string
+  legNumber: number
+  condition: LegCondition
+  strikeCriteria: string
+  strikeType: string
+  qty: number
+  position: OptionPosition
+  optionType: OptionType
+  expiry: ExpiryType
+  slType: string
+  slValue: string
+  tpType: string
+  tpValue: string
+  trailSlType: string
+  trailSlValue: string
+  priceMovement: string
+  tradingValue: string
+  prePunchSl: boolean
+  active: boolean
+}
+
+// ── Main Builder State ───────────────────────────────────────────────────────
+
+export interface BuilderState {
+  id?: string
+  strategyType: StrategyType
+  strategyName: string
+
+  // Stocks & Futures fields
+  instruments: InstrumentHit[]
+  sfOrderType: OrderTypeNew
+  startTime: string
+  squareOffTime: string
+  transactionType: TransactionType
+  chartType: ChartType
+  interval: string
+  tradeStrategy: {
+    straddle: boolean
+    optionsChart: boolean
+    spreadChart: boolean
+  }
+  longEntryConditions: Condition[]
+  shortEntryConditions: Condition[]
+
+  // Option Trading fields
+  underlying: Underlying
+  optOrderType: OrderTypeNew
+  legs: OptionLeg[]
+
+  // Exit conditions (shared)
+  exitConditionsEnabled: boolean
+  exitConditions: Condition[]
+
+  // Risk management (shared)
+  exitProfitAmount: string
+  exitLossAmount: string
+  maxTradeCycle: string
+  noTradeAfter: string
+  profitTrailing: ProfitTrailing
+
+  // Legacy compat fields (used for save/load with backend)
+  segment: Segment
+  timeframe: Timeframe
+  direction: 'long' | 'short'
+  orderType: OrderType
+  productType: ProductType
+  combinator: 'and' | 'or'
+  entryConditions: Condition[]
+  exit: ExitUiState
+  risk: RiskUiState
+  instrument: InstrumentHit | null
+  description: string
+}
+
+/** UI state for exit (kept for backward compat). */
 export interface ExitUiState {
   slEnabled: boolean
   slType: 'points' | 'percent' | 'atr'
@@ -35,28 +169,71 @@ export interface RiskUiState {
   maxTradesPerDay: string
 }
 
-export interface BuilderState {
-  id?: string
-  name: string
-  description: string
-  instrument: InstrumentHit | null
-  segment: Segment
-  timeframe: Timeframe
-  direction: 'long' | 'short'
-  orderType: OrderType
-  productType: ProductType
-  combinator: 'and' | 'or'
-  entryConditions: Condition[]
-  exit: ExitUiState
-  risk: RiskUiState
+let legCounter = 0
+export function newLegId(): string {
+  legCounter = (legCounter + 1) % 100000
+  return `leg_${Date.now().toString(36)}_${legCounter}`
+}
+
+export function newOptionLeg(legNumber: number): OptionLeg {
+  return {
+    id: newLegId(),
+    legNumber,
+    condition: 'LONG',
+    strikeCriteria: 'ATM',
+    strikeType: 'ATM',
+    qty: 1,
+    position: 'BUY',
+    optionType: 'CALL',
+    expiry: 'WEEKLY',
+    slType: 'SL%',
+    slValue: '5',
+    tpType: 'TP%',
+    tpValue: '10',
+    trailSlType: '%',
+    trailSlValue: '2',
+    priceMovement: '0',
+    tradingValue: '0',
+    prePunchSl: false,
+    active: true,
+  }
 }
 
 export function initialBuilderState(): BuilderState {
   const defaults = defaultRules()
   return {
-    name: '',
-    description: '',
-    instrument: null,
+    strategyType: 'stocks-futures',
+    strategyName: '',
+
+    // Stocks & Futures
+    instruments: [],
+    sfOrderType: 'MIS',
+    startTime: '09:16',
+    squareOffTime: '15:10',
+    transactionType: 'Both Side',
+    chartType: 'Candle',
+    interval: '5m',
+    tradeStrategy: { straddle: false, optionsChart: false, spreadChart: false },
+    longEntryConditions: [],
+    shortEntryConditions: [],
+
+    // Option Trading
+    underlying: 'Spot',
+    optOrderType: 'MIS',
+    legs: [newOptionLeg(1)],
+
+    // Exit
+    exitConditionsEnabled: false,
+    exitConditions: [],
+
+    // Risk
+    exitProfitAmount: '',
+    exitLossAmount: '',
+    maxTradeCycle: '1',
+    noTradeAfter: '15:10',
+    profitTrailing: 'No Trailing',
+
+    // Legacy compat
     segment: 'equity',
     timeframe: '5m',
     direction: defaults.direction.side,
@@ -81,6 +258,8 @@ export function initialBuilderState(): BuilderState {
       maxHoldBars: '30',
     },
     risk: { quantity: '1', capitalAllocPercent: '', maxPositions: '1', maxTradesPerDay: '5' },
+    instrument: null,
+    description: '',
   }
 }
 
@@ -95,29 +274,40 @@ export function newCondition(): Condition {
 
 const num = (s: string): number => Number(s)
 
-/** Assemble the persistable rule tree (input to validateStrategyRules + the engines). */
+/** Map new order type to legacy product type for backend compat. */
+function toProductType(ot: OrderTypeNew): ProductType {
+  if (ot === 'MIS') return 'INTRADAY'
+  if (ot === 'CNC') return 'DELIVERY'
+  return 'BTST'
+}
+
+/** Assemble the persistable rule tree for Stocks & Futures. */
 export function toRules(state: BuilderState): StrategyRules {
+  // For stocks-futures, merge long+short conditions
+  const allConditions = [...state.longEntryConditions, ...state.shortEntryConditions]
+  const exitRules = state.exit
+
   return {
     version: RULE_SCHEMA_VERSION,
     direction: { side: state.direction },
-    entry: { orderType: state.orderType, productType: state.productType },
-    entryConditions: { combinator: state.combinator, conditions: state.entryConditions },
+    entry: { orderType: state.orderType, productType: toProductType(state.sfOrderType) },
+    entryConditions: { combinator: 'and', conditions: allConditions.length > 0 ? allConditions : state.entryConditions },
     exit: {
-      ...(state.exit.slEnabled
+      ...(exitRules.slEnabled
         ? {
             stopLoss: {
-              type: state.exit.slType,
-              value: num(state.exit.slValue),
-              ...(state.exit.slType === 'atr' ? { atrPeriod: num(state.exit.slAtrPeriod) } : {}),
+              type: exitRules.slType,
+              value: num(exitRules.slValue),
+              ...(exitRules.slType === 'atr' ? { atrPeriod: num(exitRules.slAtrPeriod) } : {}),
             },
           }
         : {}),
-      ...(state.exit.targetEnabled ? { target: { type: state.exit.targetType, value: num(state.exit.targetValue) } } : {}),
-      ...(state.exit.trailingEnabled
-        ? { trailingStopLoss: { type: state.exit.trailingType, value: num(state.exit.trailingValue) } }
+      ...(exitRules.targetEnabled ? { target: { type: exitRules.targetType, value: num(exitRules.targetValue) } } : {}),
+      ...(exitRules.trailingEnabled
+        ? { trailingStopLoss: { type: exitRules.trailingType, value: num(exitRules.trailingValue) } }
         : {}),
-      ...(state.exit.timeSqEnabled ? { timeSquareOff: { time: state.exit.timeSq } } : {}),
-      ...(state.exit.maxHoldEnabled ? { maxHoldingBars: num(state.exit.maxHoldBars) } : {}),
+      ...(exitRules.timeSqEnabled ? { timeSquareOff: { time: exitRules.timeSq } } : {}),
+      ...(exitRules.maxHoldEnabled ? { maxHoldingBars: num(exitRules.maxHoldBars) } : {}),
     },
     risk: {
       quantity: num(state.risk.quantity),
@@ -128,12 +318,14 @@ export function toRules(state: BuilderState): StrategyRules {
   }
 }
 
-/** Hydrate the wizard from a saved strategy (edit mode). */
+/** Hydrate the builder from a saved strategy (edit mode). */
 export function fromStrategyRow(row: StrategyRowView): BuilderState {
   const r = row.rules
   return {
+    ...initialBuilderState(),
     id: row.id,
-    name: row.name,
+    strategyName: row.name,
+    strategyType: row.segment === 'options' ? 'option-indicator' : 'stocks-futures',
     description: row.description ?? '',
     instrument: {
       token: row.symbol_token,
@@ -146,13 +338,30 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
       expiry: null,
       strike: null,
     },
+    instruments: [
+      {
+        token: row.symbol_token,
+        symbol: row.instrument,
+        name: null,
+        exchange: row.exchange,
+        segment: row.segment,
+        lotsize: null,
+        tick_size: null,
+        expiry: null,
+        strike: null,
+      },
+    ],
     segment: row.segment,
     timeframe: row.timeframe as Timeframe,
+    interval: row.timeframe,
     direction: r.direction.side,
     orderType: r.entry.orderType,
     productType: r.entry.productType,
+    sfOrderType: r.entry.productType === 'INTRADAY' ? 'MIS' : r.entry.productType === 'DELIVERY' ? 'CNC' : 'BTST',
     combinator: r.entryConditions.combinator,
     entryConditions: r.entryConditions.conditions,
+    longEntryConditions: r.direction.side === 'long' ? r.entryConditions.conditions : [],
+    shortEntryConditions: r.direction.side === 'short' ? r.entryConditions.conditions : [],
     exit: {
       slEnabled: r.exit.stopLoss != null,
       slType: r.exit.stopLoss?.type ?? 'points',
@@ -175,6 +384,8 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
       maxPositions: String(r.risk.maxConcurrentPositions),
       maxTradesPerDay: String(r.risk.maxTradesPerDay),
     },
+    exitConditionsEnabled: false,
+    exitConditions: [],
   }
 }
 
@@ -182,8 +393,8 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
 export function stepErrors(state: BuilderState, step: number): string[] {
   const errors: string[] = []
   if (step === 0) {
-    if (!state.name.trim()) errors.push('Strategy name is required')
-    if (!state.instrument) errors.push('Choose an instrument from the search')
+    if (!state.strategyName.trim()) errors.push('Strategy name is required')
+    if (state.strategyType === 'stocks-futures' && state.instruments.length === 0) errors.push('Choose at least one instrument')
   }
   if (step === 1 && state.entryConditions.length === 0) errors.push('Add at least one entry condition')
   if (step === 2) {
