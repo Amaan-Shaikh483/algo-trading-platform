@@ -15,8 +15,8 @@ import { notificationsRouter } from './notifications'
  *
  * Step 4  -> /api/broker          (connect/test/disconnect/status — spec 3.2) ✅ LIVE
  * Step 5  -> /api/strategies      (CRUD + clone + toggle   — spec 3.4) ✅ LIVE
- *         -> /api/instruments     (cached search           — spec 3.3) ✅ LIVE
- *         -> /api/watchlist       (CRUD + reorder          — spec 3.3) ✅ LIVE
+ *         -> /api/instruments     (cached search + candles — spec 3.3) ✅ LIVE
+ *         -> /api/watchlist       (CRUD + reorder + chart  — spec 3.3) ✅ LIVE
  * Step 6  -> /api/backtests       (queue runs, poll reports — spec 3.5) ✅ LIVE
  * Step 7  -> /api/risk            (kill switch, limits, unblock — spec 3.7; landed
  *                                  EARLY per safety override: risk manager gates

@@ -11,14 +11,15 @@
     "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
+    "@algo/rule-schema": "*",
     "@supabase/supabase-js": "^2.109.0",
+    "lightweight-charts": "^5.2.0",
     "lucide-react": "^1.26.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-router-dom": "^7.18.1",
     "recharts": "^3.10.0",
-    "zustand": "^5.0.14",
-    "@algo/rule-schema": "*"
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
