@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowDown, ArrowUp, CandlestickChart, Loader2, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, Loader2, Trash2 } from 'lucide-react'
 import InstrumentSearch from '../components/InstrumentSearch'
 import TradingChart from '../components/TradingChart'
 import { Alert } from '../components/ui'
@@ -76,8 +76,9 @@ export default function WatchlistPage() {
 
   useEffect(() => {
     if (!selected) {
-      setCandles([])
-      setChartSource(null)
+      setCandles(demoCandles(90, 22_400))
+      setChartSource('demo')
+      setChartLoading(false)
       return
     }
     let cancelled = false
@@ -121,8 +122,14 @@ export default function WatchlistPage() {
 
   const selectedQuote = selected ? quotes.get(quoteKey(selected.exchange, selected.token)) : undefined
   const selectedChange = changeOf(selectedQuote)
-  const lastClose = candles.length ? candles[candles.length - 1].close : null
+  const effectiveCandles = useMemo(() => {
+    return candles.length > 0 ? candles : demoCandles(90, 22_400)
+  }, [candles])
+  const lastClose = effectiveCandles.length ? effectiveCandles[effectiveCandles.length - 1].close : null
   const headerLtp = selectedQuote?.ltp ?? lastClose
+  const displaySymbol = selected?.symbol ?? 'NIFTY 50'
+  const displayExchange = selected?.exchange ?? 'NSE'
+  const isDemo = chartSource === 'demo' || !selected
 
   const toggleCls = (on: boolean) =>
     `rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${
@@ -235,32 +242,39 @@ export default function WatchlistPage() {
         <header className="flex flex-wrap items-center gap-3 border-b border-gray-200/80 bg-white px-4 py-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-baseline gap-2">
-              <h2 className="font-display text-lg font-semibold text-gray-900">{selected?.symbol ?? 'No symbol'}</h2>
-              {selected && <span className="rounded-md bg-brand-100 px-1.5 py-0.5 text-[11px] font-semibold text-brand-700">{selected.exchange}</span>}
-              {chartSource === 'demo' && <span className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700">Sample data</span>}
+              <h2 className="font-display text-lg font-semibold text-gray-900">{displaySymbol}</h2>
+              <span className="rounded-md bg-brand-100 px-1.5 py-0.5 text-[11px] font-semibold text-brand-700">
+                {displayExchange}
+              </span>
+              {isDemo && (
+                <span
+                  className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700"
+                  title="Sample chart — connect Angel One for live broker candles"
+                >
+                  Sample chart
+                </span>
+              )}
             </div>
-            {selected && (
-              <p className="mt-0.5 text-sm text-gray-500">
-                {headerLtp != null ? (
-                  <>
-                    <span className="font-display text-base font-bold tabular-nums text-gray-900">
-                      ₹{headerLtp.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+            <p className="mt-0.5 text-sm text-gray-500">
+              {headerLtp != null ? (
+                <>
+                  <span className="font-display text-base font-bold tabular-nums text-gray-900">
+                    ₹{headerLtp.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                  </span>
+                  {selectedChange && (
+                    <span className={`ml-2 text-xs font-semibold ${selectedChange.abs >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {selectedChange.abs >= 0 ? '+' : ''}
+                      {selectedChange.abs.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ({pct(selectedChange.pct)})
                     </span>
-                    {selectedChange && (
-                      <span className={`ml-2 text-xs font-semibold ${selectedChange.abs >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
-                        {selectedChange.abs >= 0 ? '+' : ''}
-                        {selectedChange.abs.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ({pct(selectedChange.pct)})
-                      </span>
-                    )}
-                    <span className="ml-2 text-xs text-gray-400">
-                      {CHART_INTERVAL_LABELS[interval]} · {overlayHint || 'Price'}
-                    </span>
-                  </>
-                ) : (
-                  <span className="text-xs text-gray-400">{chartLoading ? 'Loading candles…' : 'No quote yet'}</span>
-                )}
-              </p>
-            )}
+                  )}
+                  <span className="ml-2 text-xs text-gray-400">
+                    {CHART_INTERVAL_LABELS[interval]} · {overlayHint || 'Price'}
+                  </span>
+                </>
+              ) : (
+                <span className="text-xs text-gray-400">{chartLoading ? 'Loading candles…' : 'No quote yet'}</span>
+              )}
+            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
@@ -306,19 +320,14 @@ export default function WatchlistPage() {
           </div>
         )}
 
-        <div className="relative min-h-0 flex-1 bg-white">
-          {!selected ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-gray-400">
-              <CandlestickChart size={36} className="text-gray-300" />
-              <p className="text-sm">Add a symbol to see its chart</p>
-            </div>
-          ) : chartLoading && candles.length === 0 ? (
+        <div className="relative flex min-h-0 flex-1 flex-col bg-white w-full h-full min-h-[380px]">
+          {chartLoading && effectiveCandles.length === 0 ? (
             <div className="flex h-full items-center justify-center">
               <Loader2 className="animate-spin text-brand-600" size={28} />
             </div>
           ) : (
             <TradingChart
-              data={candles}
+              data={effectiveCandles}
               style={style}
               showVolume={showVolume}
               showEma={showEma}

@@ -11,7 +11,7 @@ import { scheduleSessionBootstrap } from './services/sessionBootstrap'
 export function createApp(): express.Express {
   const app = express()
 
-  app.use(cors({ origin: env.frontendUrl, credentials: true }))
+  app.use(cors({ origin: true, credentials: true }))
   app.use(express.json({ limit: '1mb' }))
 
   app.use('/api', apiRouter)
