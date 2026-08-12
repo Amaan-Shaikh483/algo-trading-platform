@@ -271,6 +271,10 @@ export interface ExitRules {
   timeSquareOff?: { time: string }
   /** Force exit after N candles regardless of SL/target. */
   maxHoldingBars?: number
+  /** Portfolio-level overall profit lock in INR (builder Risk Management). */
+  overallProfitAmount?: number
+  /** Portfolio-level overall loss limit in INR (builder Risk Management). */
+  overallLossAmount?: number
 }
 
 export interface RiskRules {
@@ -309,8 +313,9 @@ export function defaultRules(): StrategyRules {
     entry: { orderType: 'MARKET', productType: 'INTRADAY' },
     entryConditions: { combinator: 'and', conditions: [] },
     exit: {
-      stopLoss: { type: 'points', value: 0 },
-      target: { type: 'rr_multiple', value: 2 },
+      // Do not seed stopLoss with value 0 — validation requires value > 0
+      // when the field is present. The builder maps Exit Loss (INR) / leg SL
+      // into a real stopLoss; time square-off alone is a valid exit.
       timeSquareOff: { time: '15:20' },
     },
     risk: { quantity: 1, maxConcurrentPositions: 1, maxTradesPerDay: 5 },
@@ -456,24 +461,45 @@ export function validateStrategyRules(rules: unknown): { valid: boolean; errors:
   }
 
   const ex = r.exit ?? {}
-  if (ex.stopLoss) {
+  // Coerce HTML/JSON numeric strings ("1000") so validation matches what the
+  // user typed. A 0 / empty stopLoss is treated as "not configured" — the
+  // builder used to default slValue to 0 while the visible Exit Loss (INR)
+  // and per-leg SL fields lived on different state keys.
+  const asFinite = (v: unknown): number | undefined => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v)
+      if (Number.isFinite(n)) return n
+    }
+    return undefined
+  }
+  const slValue = asFinite(ex.stopLoss?.value)
+  const hasStopLoss = slValue != null && slValue > 0
+  if (ex.stopLoss && hasStopLoss) {
     if (!['points', 'percent', 'atr'].includes(ex.stopLoss.type)) errors.push('exit.stopLoss.type invalid')
-    if (!(ex.stopLoss.value > 0)) errors.push('exit.stopLoss.value must be > 0')
-    if (ex.stopLoss.type === 'percent' && ex.stopLoss.value > 100) errors.push('exit.stopLoss percent must be ≤ 100')
-    if (ex.stopLoss.type === 'atr' && ex.stopLoss.atrPeriod != null && ex.stopLoss.atrPeriod < 1) {
+    if (ex.stopLoss.type === 'percent' && slValue > 100) errors.push('exit.stopLoss percent must be ≤ 100')
+    if (ex.stopLoss.type === 'atr' && ex.stopLoss.atrPeriod != null && Number(ex.stopLoss.atrPeriod) < 1) {
       errors.push('exit.stopLoss.atrPeriod must be ≥ 1')
     }
+  } else if (ex.stopLoss && slValue != null && slValue < 0) {
+    errors.push('exit.stopLoss.value must be > 0')
   }
-  if (ex.target) {
+  const tgtValue = asFinite(ex.target?.value)
+  const hasTarget = tgtValue != null && tgtValue > 0
+  if (ex.target && hasTarget) {
     if (!['points', 'percent', 'rr_multiple'].includes(ex.target.type)) errors.push('exit.target.type invalid')
-    if (!(ex.target.value > 0)) errors.push('exit.target.value must be > 0')
-    if (ex.target.type === 'rr_multiple' && !ex.stopLoss) {
+    if (ex.target.type === 'rr_multiple' && !hasStopLoss) {
       errors.push('exit.target (risk × reward) requires a stop loss to measure risk against')
     }
+  } else if (ex.target && tgtValue != null && tgtValue < 0) {
+    errors.push('exit.target.value must be > 0')
   }
-  if (ex.trailingStopLoss) {
+  const trailValue = asFinite(ex.trailingStopLoss?.value)
+  const hasTrail = trailValue != null && trailValue > 0
+  if (ex.trailingStopLoss && hasTrail) {
     if (!['points', 'percent'].includes(ex.trailingStopLoss.type)) errors.push('exit.trailingStopLoss.type invalid')
-    if (!(ex.trailingStopLoss.value > 0)) errors.push('exit.trailingStopLoss.value must be > 0')
+  } else if (ex.trailingStopLoss && trailValue != null && trailValue < 0) {
+    errors.push('exit.trailingStopLoss.value must be > 0')
   }
   if (ex.timeSquareOff && !/^([01]\d|2[0-3]):[0-5]\d$/.test(ex.timeSquareOff.time)) {
     errors.push('exit.timeSquareOff.time must be HH:mm (24h, IST)')
@@ -481,7 +507,15 @@ export function validateStrategyRules(rules: unknown): { valid: boolean; errors:
   if (ex.maxHoldingBars != null && (!Number.isInteger(ex.maxHoldingBars) || ex.maxHoldingBars < 1)) {
     errors.push('exit.maxHoldingBars must be a positive integer')
   }
-  if (!ex.stopLoss && !ex.target && !ex.timeSquareOff && !ex.maxHoldingBars && !ex.trailingStopLoss) {
+  const overallProfit = asFinite(ex.overallProfitAmount)
+  if (ex.overallProfitAmount != null && !(overallProfit != null && overallProfit > 0)) {
+    errors.push('exit.overallProfitAmount must be > 0')
+  }
+  const overallLoss = asFinite(ex.overallLossAmount)
+  if (ex.overallLossAmount != null && !(overallLoss != null && overallLoss > 0)) {
+    errors.push('exit.overallLossAmount must be > 0')
+  }
+  if (!hasStopLoss && !hasTarget && !ex.timeSquareOff && !ex.maxHoldingBars && !hasTrail) {
     errors.push('at least one exit rule is required (stop loss, target, trailing SL, time square-off, or max holding)')
   }
 
@@ -533,9 +567,21 @@ export function summarizeRules(r: StrategyRules): string[] {
     lines.push(`Entry ${i + 1}${r.entryConditions.conditions.length > 1 ? ` (${comb})` : ''}: ${d.left} ${d.operator} ${d.right}`)
   })
   const ex = r.exit
-  if (ex.stopLoss) lines.push(`Stop loss: ${ex.stopLoss.value} ${ex.stopLoss.type === 'percent' ? '%' : ex.stopLoss.type === 'atr' ? '× ATR' : 'pts'}`)
-  if (ex.target) lines.push(`Target: ${ex.target.value} ${ex.target.type === 'percent' ? '%' : ex.target.type === 'rr_multiple' ? '× risk (R:R)' : 'pts'}`)
-  if (ex.trailingStopLoss) lines.push(`Trailing SL: ${ex.trailingStopLoss.value} ${ex.trailingStopLoss.type === 'percent' ? '%' : 'pts'}`)
+  if (ex.stopLoss && Number(ex.stopLoss.value) > 0) {
+    lines.push(`Stop loss: ${ex.stopLoss.value} ${ex.stopLoss.type === 'percent' ? '%' : ex.stopLoss.type === 'atr' ? '× ATR' : 'pts'}`)
+  }
+  if (ex.target && Number(ex.target.value) > 0) {
+    lines.push(`Target: ${ex.target.value} ${ex.target.type === 'percent' ? '%' : ex.target.type === 'rr_multiple' ? '× risk (R:R)' : 'pts'}`)
+  }
+  if (ex.trailingStopLoss && Number(ex.trailingStopLoss.value) > 0) {
+    lines.push(`Trailing SL: ${ex.trailingStopLoss.value} ${ex.trailingStopLoss.type === 'percent' ? '%' : 'pts'}`)
+  }
+  if (ex.overallProfitAmount != null && Number(ex.overallProfitAmount) > 0) {
+    lines.push(`Exit when overall profit: ₹${ex.overallProfitAmount}`)
+  }
+  if (ex.overallLossAmount != null && Number(ex.overallLossAmount) > 0) {
+    lines.push(`Exit when overall loss: ₹${ex.overallLossAmount}`)
+  }
   if (ex.timeSquareOff) lines.push(`Time square-off: ${ex.timeSquareOff.time} IST`)
   if (ex.maxHoldingBars) lines.push(`Max holding: ${ex.maxHoldingBars} candles`)
   lines.push(`Qty: ${r.risk.quantity} · Max positions: ${r.risk.maxConcurrentPositions} · Max trades/day: ${r.risk.maxTradesPerDay}${r.risk.capitalAllocationPercent ? ` · Capital: ${r.risk.capitalAllocationPercent}%` : ''}`)

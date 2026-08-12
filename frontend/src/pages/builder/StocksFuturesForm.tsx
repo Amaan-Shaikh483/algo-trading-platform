@@ -503,14 +503,16 @@ function RiskManagementSection({
             value={exitProfitAmount}
             onChange={(e) => onFieldChange('exitProfitAmount', e.target.value)}
             placeholder="e.g. 5000"
+            hint="Book the whole strategy when unrealized + realized profit reaches this amount."
           />
           <TextInput
             label="Exit When Over All Loss (INR)"
             type="number"
-            max={0}
+            min={0}
             value={exitLossAmount}
             onChange={(e) => onFieldChange('exitLossAmount', e.target.value)}
-            placeholder="e.g. -2000"
+            placeholder="e.g. 1000"
+            hint="Positive INR amount. Mapped to the strategy stop-loss (also accepts a negative loss figure)."
           />
         </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

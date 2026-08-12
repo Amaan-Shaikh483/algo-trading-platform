@@ -2,12 +2,16 @@ import { RULE_SCHEMA_VERSION, defaultRules, newConditionId } from '@algo/rule-sc
 import type {
   Condition,
   ConditionGroup,
+  ExitRules,
   OrderType,
   ProductType,
   Segment,
+  StopLossRule,
   StrategyRuleLeg,
   StrategyRules,
+  TargetRule,
   Timeframe,
+  TrailingSlRule,
 } from '@algo/rule-schema'
 import type { InstrumentHit } from '../../lib/instrumentApi'
 import type { StrategyRowView } from '../../lib/strategyApi'
@@ -233,7 +237,8 @@ export function initialBuilderState(): BuilderState {
     exitConditionsEnabled: false,
     exitConditions: [],
 
-    // Risk
+    // Risk — these are the fields the builder actually shows.
+    // Leave empty so toRules can fall back to per-leg SL / square-off time.
     exitProfitAmount: '',
     exitLossAmount: '',
     maxTradeCycle: '1',
@@ -249,16 +254,16 @@ export function initialBuilderState(): BuilderState {
     combinator: 'and',
     entryConditions: [],
     exit: {
-      slEnabled: true,
+      slEnabled: false,
       slType: 'points',
-      slValue: '0',
+      slValue: '',
       slAtrPeriod: '14',
-      targetEnabled: true,
+      targetEnabled: false,
       targetType: 'rr_multiple',
       targetValue: '2',
       trailingEnabled: false,
       trailingType: 'points',
-      trailingValue: '0',
+      trailingValue: '',
       timeSqEnabled: true,
       timeSq: '15:20',
       maxHoldEnabled: false,
@@ -280,6 +285,139 @@ export function newCondition(): Condition {
 }
 
 const num = (s: string): number => Number(s)
+
+/** Parse a builder input as a positive amount. Accepts "1000" and "-2000". */
+export function parsePositiveAmount(raw: string | number | undefined | null): number | undefined {
+  if (raw == null) return undefined
+  const s = String(raw).trim()
+  if (!s) return undefined
+  const n = Number(s)
+  if (!Number.isFinite(n) || n === 0) return undefined
+  return Math.abs(n)
+}
+
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/
+
+function isOptionStrategy(type: StrategyType): boolean {
+  return type === 'option-indicator' || type === 'option-time'
+}
+
+function mapUiSlType(raw: string): StopLossRule['type'] {
+  const s = (raw ?? '').toLowerCase()
+  if (s.includes('atr')) return 'atr'
+  if (s.includes('%') || s.includes('percent')) return 'percent'
+  return 'points'
+}
+
+function mapUiTpType(raw: string): TargetRule['type'] {
+  const s = (raw ?? '').toLowerCase()
+  if (s.includes('rr') || s.includes('risk')) return 'rr_multiple'
+  if (s.includes('%') || s.includes('percent')) return 'percent'
+  return 'points'
+}
+
+function mapUiTrailType(raw: string): TrailingSlRule['type'] {
+  const s = (raw ?? '').toLowerCase()
+  if (s.includes('%') || s.includes('percent')) return 'percent'
+  return 'points'
+}
+
+/**
+ * Build exit.stopLoss from the fields the user actually edits:
+ *   1. Exit Loss (INR)  — risk-management section
+ *   2. Strategy-leg Stop Loss (option strategies)
+ *   3. Legacy Exit-step SL (old wizard)
+ * Never emit value 0 — that trips `exit.stopLoss.value must be > 0`.
+ */
+export function deriveStopLoss(state: BuilderState): StopLossRule | undefined {
+  const overallLoss = parsePositiveAmount(state.exitLossAmount)
+  if (overallLoss != null) {
+    return { type: 'points', value: overallLoss }
+  }
+
+  if (isOptionStrategy(state.strategyType)) {
+    const slLeg = state.legs.find((l) => l.active !== false && parsePositiveAmount(l.slValue) != null)
+    if (slLeg) {
+      return { type: mapUiSlType(slLeg.slType), value: parsePositiveAmount(slLeg.slValue)! }
+    }
+  }
+
+  if (state.exit.slEnabled) {
+    const legacy = parsePositiveAmount(state.exit.slValue)
+    if (legacy != null) {
+      return {
+        type: state.exit.slType,
+        value: legacy,
+        ...(state.exit.slType === 'atr' ? { atrPeriod: parsePositiveAmount(state.exit.slAtrPeriod) ?? 14 } : {}),
+      }
+    }
+  }
+  return undefined
+}
+
+function deriveTarget(state: BuilderState, hasStopLoss: boolean): TargetRule | undefined {
+  const overallProfit = parsePositiveAmount(state.exitProfitAmount)
+  if (overallProfit != null) {
+    return { type: 'points', value: overallProfit }
+  }
+
+  if (isOptionStrategy(state.strategyType)) {
+    const tpLeg = state.legs.find((l) => l.active !== false && parsePositiveAmount(l.tpValue) != null)
+    if (tpLeg) {
+      const type = mapUiTpType(tpLeg.tpType)
+      if (type === 'rr_multiple' && !hasStopLoss) return undefined
+      return { type, value: parsePositiveAmount(tpLeg.tpValue)! }
+    }
+  }
+
+  if (state.exit.targetEnabled) {
+    const legacy = parsePositiveAmount(state.exit.targetValue)
+    if (legacy != null) {
+      if (state.exit.targetType === 'rr_multiple' && !hasStopLoss) return undefined
+      return { type: state.exit.targetType, value: legacy }
+    }
+  }
+  return undefined
+}
+
+function deriveTrailing(state: BuilderState): TrailingSlRule | undefined {
+  if (state.exit.trailingEnabled) {
+    const v = parsePositiveAmount(state.exit.trailingValue)
+    if (v != null) return { type: state.exit.trailingType, value: v }
+  }
+  if (state.profitTrailing && state.profitTrailing !== 'No Trailing' && isOptionStrategy(state.strategyType)) {
+    const trailLeg = state.legs.find((l) => l.active !== false && parsePositiveAmount(l.trailSlValue) != null)
+    if (trailLeg) {
+      return { type: mapUiTrailType(trailLeg.trailSlType), value: parsePositiveAmount(trailLeg.trailSlValue)! }
+    }
+  }
+  return undefined
+}
+
+function deriveTimeSquareOff(state: BuilderState): { time: string } | undefined {
+  if (TIME_RE.test(state.squareOffTime)) return { time: state.squareOffTime }
+  if (state.exit.timeSqEnabled && TIME_RE.test(state.exit.timeSq)) return { time: state.exit.timeSq }
+  return undefined
+}
+
+function deriveExit(state: BuilderState): ExitRules {
+  const stopLoss = deriveStopLoss(state)
+  const target = deriveTarget(state, stopLoss != null)
+  const trailingStopLoss = deriveTrailing(state)
+  const timeSquareOff = deriveTimeSquareOff(state)
+  const overallProfitAmount = parsePositiveAmount(state.exitProfitAmount)
+  const overallLossAmount = parsePositiveAmount(state.exitLossAmount)
+
+  return {
+    ...(stopLoss ? { stopLoss } : {}),
+    ...(target ? { target } : {}),
+    ...(trailingStopLoss ? { trailingStopLoss } : {}),
+    ...(timeSquareOff ? { timeSquareOff } : {}),
+    ...(state.exit.maxHoldEnabled ? { maxHoldingBars: num(state.exit.maxHoldBars) } : {}),
+    ...(overallProfitAmount != null ? { overallProfitAmount } : {}),
+    ...(overallLossAmount != null ? { overallLossAmount } : {}),
+  }
+}
 
 /** Map new order type to legacy product type for backend compat. */
 function toProductType(ot: OrderTypeNew): ProductType {
@@ -348,33 +486,18 @@ export function hydrateLegs(legs?: StrategyRuleLeg[]): OptionLeg[] {
 export function toRules(state: BuilderState): StrategyRules {
   // Merge long+short conditions into the engine-consumed entryConditions group.
   const allConditions = [...state.longEntryConditions, ...state.shortEntryConditions]
-  const exitRules = state.exit
+  const orderTypeNew = state.strategyType === 'stocks-futures' ? state.sfOrderType : state.optOrderType
+  const optionLegs = isOptionStrategy(state.strategyType) ? state.legs : []
 
   return {
     version: RULE_SCHEMA_VERSION,
     direction: { side: state.direction },
-    entry: { orderType: state.orderType, productType: toProductType(state.sfOrderType) },
+    entry: { orderType: state.orderType, productType: toProductType(orderTypeNew) },
     entryConditions: { combinator: 'and', conditions: allConditions.length > 0 ? allConditions : state.entryConditions },
     longEntryConditions: groupOf(state.longEntryConditions),
     shortEntryConditions: groupOf(state.shortEntryConditions),
-    legs: state.legs.length > 0 ? state.legs.map(serializeLeg) : undefined,
-    exit: {
-      ...(exitRules.slEnabled
-        ? {
-            stopLoss: {
-              type: exitRules.slType,
-              value: num(exitRules.slValue),
-              ...(exitRules.slType === 'atr' ? { atrPeriod: num(exitRules.slAtrPeriod) } : {}),
-            },
-          }
-        : {}),
-      ...(exitRules.targetEnabled ? { target: { type: exitRules.targetType, value: num(exitRules.targetValue) } } : {}),
-      ...(exitRules.trailingEnabled
-        ? { trailingStopLoss: { type: exitRules.trailingType, value: num(exitRules.trailingValue) } }
-        : {}),
-      ...(exitRules.timeSqEnabled ? { timeSquareOff: { time: exitRules.timeSq } } : {}),
-      ...(exitRules.maxHoldEnabled ? { maxHoldingBars: num(exitRules.maxHoldBars) } : {}),
-    },
+    legs: optionLegs.length > 0 ? optionLegs.map(serializeLeg) : undefined,
+    exit: deriveExit(state),
     risk: {
       quantity: num(state.risk.quantity),
       ...(state.risk.capitalAllocPercent.trim() ? { capitalAllocationPercent: num(state.risk.capitalAllocPercent) } : {}),
@@ -387,11 +510,24 @@ export function toRules(state: BuilderState): StrategyRules {
 /** Hydrate the builder from a saved strategy (edit mode). */
 export function fromStrategyRow(row: StrategyRowView): BuilderState {
   const r = row.rules
+  const optionTime = (r.legs ?? []).some((l) => Boolean(l.entryTime))
+  const restoredLoss =
+    r.exit.overallLossAmount != null
+      ? String(r.exit.overallLossAmount)
+      : r.exit.stopLoss?.type === 'points'
+        ? String(r.exit.stopLoss.value)
+        : ''
+  const restoredProfit =
+    r.exit.overallProfitAmount != null
+      ? String(r.exit.overallProfitAmount)
+      : r.exit.target?.type === 'points'
+        ? String(r.exit.target.value)
+        : ''
   return {
     ...initialBuilderState(),
     id: row.id,
     strategyName: row.name,
-    strategyType: row.segment === 'options' ? 'option-indicator' : 'stocks-futures',
+    strategyType: row.segment === 'options' ? (optionTime ? 'option-time' : 'option-indicator') : 'stocks-futures',
     description: row.description ?? '',
     instrument: {
       token: row.symbol_token,
@@ -439,18 +575,24 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
     entryConditions: r.entryConditions.conditions,
     longEntryConditions: r.longEntryConditions?.conditions ?? (r.direction.side === 'long' ? r.entryConditions.conditions : []),
     shortEntryConditions: r.shortEntryConditions?.conditions ?? (r.direction.side === 'short' ? r.entryConditions.conditions : []),
-    legs: hydrateLegs(r.legs),
+    legs: (() => {
+      const hydrated = hydrateLegs(r.legs)
+      return hydrated.length > 0 ? hydrated : initialBuilderState().legs
+    })(),
+    squareOffTime: r.exit.timeSquareOff?.time ?? '15:10',
+    exitProfitAmount: restoredProfit,
+    exitLossAmount: restoredLoss,
     exit: {
-      slEnabled: r.exit.stopLoss != null,
+      slEnabled: r.exit.stopLoss != null && Number(r.exit.stopLoss.value) > 0,
       slType: r.exit.stopLoss?.type ?? 'points',
-      slValue: String(r.exit.stopLoss?.value ?? 0),
+      slValue: r.exit.stopLoss != null && Number(r.exit.stopLoss.value) > 0 ? String(r.exit.stopLoss.value) : '',
       slAtrPeriod: String(r.exit.stopLoss?.atrPeriod ?? 14),
-      targetEnabled: r.exit.target != null,
+      targetEnabled: r.exit.target != null && Number(r.exit.target.value) > 0,
       targetType: r.exit.target?.type ?? 'rr_multiple',
       targetValue: String(r.exit.target?.value ?? 2),
-      trailingEnabled: r.exit.trailingStopLoss != null,
+      trailingEnabled: r.exit.trailingStopLoss != null && Number(r.exit.trailingStopLoss.value) > 0,
       trailingType: r.exit.trailingStopLoss?.type ?? 'points',
-      trailingValue: String(r.exit.trailingStopLoss?.value ?? 0),
+      trailingValue: r.exit.trailingStopLoss != null ? String(r.exit.trailingStopLoss.value) : '',
       timeSqEnabled: r.exit.timeSquareOff != null,
       timeSq: r.exit.timeSquareOff?.time ?? '15:20',
       maxHoldEnabled: r.exit.maxHoldingBars != null,
