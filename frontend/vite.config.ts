@@ -9,6 +9,16 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     allowedHosts: true as unknown as string[],
+    proxy: {
+      '/api': {
+        target: 'http://localhost:4000',
+        changeOrigin: true,
+      },
+      '/internal': {
+        target: 'http://localhost:4000',
+        changeOrigin: true,
+      },
+    },
   },
   resolve: {
     alias: {

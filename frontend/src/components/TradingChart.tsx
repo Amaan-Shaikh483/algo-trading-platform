@@ -66,9 +66,12 @@ export default function TradingChart({
     const el = hostRef.current
     if (!el) return
 
+    const initialWidth = el.clientWidth || el.parentElement?.clientWidth || 800
+    const initialHeight = el.clientHeight || el.parentElement?.clientHeight || 480
+
     const chart = createChart(el, {
-      width: el.clientWidth,
-      height: el.clientHeight || 480,
+      width: initialWidth,
+      height: initialHeight,
       autoSize: true,
       layout: {
         background: { type: ColorType.Solid, color: '#ffffff' },
@@ -93,6 +96,16 @@ export default function TradingChart({
       handleScroll: { vertTouchDrag: false },
     })
     chartRef.current = chart
+
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect
+        if (width > 0 && height > 0 && chartRef.current) {
+          chartRef.current.applyOptions({ width, height })
+        }
+      }
+    })
+    ro.observe(el)
 
     let price: CandleApi | BarApi | AreaApi
     if (style === 'bar') {
@@ -195,6 +208,7 @@ export default function TradingChart({
     apply(data)
 
     return () => {
+      ro.disconnect()
       chart.remove()
       chartRef.current = null
       priceRef.current = null
@@ -276,5 +290,11 @@ export default function TradingChart({
     })
   }, [lastPrice, style])
 
-  return <div ref={hostRef} className="h-full w-full min-h-[280px]" />
+  return (
+    <div
+      ref={hostRef}
+      className="w-full flex-1 min-h-[360px]"
+      style={{ minHeight: '360px', height: '100%', width: '100%', position: 'relative' }}
+    />
+  )
 }
