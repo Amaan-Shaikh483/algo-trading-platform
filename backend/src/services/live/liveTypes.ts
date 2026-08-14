@@ -29,7 +29,21 @@ export const WS_EXCHANGE_TYPE: Record<Exchange, number> = {
 export const WS_SUBSCRIPTION_MODE = { LTP: 1, Quote: 2, SnapQuote: 3, Depth: 4 } as const
 
 /** Exit reasons shared with the backtest engine's vocabulary (parity matters for dashboards/tests). */
-export type LiveExitReason = 'stop_loss' | 'trailing_stop' | 'target' | 'time_squareoff' | 'max_holding' | 'kill_switch' | 'reconciled_external' | 'strategy_stopped'
+export type LiveExitReason =
+  | 'stop_loss'
+  | 'trailing_stop'
+  | 'target'
+  | 'time_squareoff'
+  | 'max_holding'
+  | 'kill_switch'
+  | 'reconciled_external'
+  | 'strategy_stopped'
+  /** Risk Management: overall Exit Profit (INR) reached. */
+  | 'overall_profit'
+  /** Risk Management: overall Exit Loss (INR) reached. */
+  | 'overall_loss'
+  /** Risk Management: profit fell back to the trailing locked floor. */
+  | 'profit_trailing'
 
 /** Engine mirror persisted on positions.runtime_state — worker restarts resume exits from here. */
 export interface PositionRuntimeState {

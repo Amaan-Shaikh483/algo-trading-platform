@@ -7,6 +7,16 @@ import { notify } from '../userEvents'
 import { IndicatorRuntime, collectIndicatorSpecs, hhmmToMinutes, istDayKey, istMinutesOfDay } from '../engine/indicatorEngine'
 import { evaluateEntrySignal } from '../engine/ruleEvaluator'
 import { hasTimeTriggeredLegs, legSide, markLegFired, pickScheduledLeg } from '../engine/timeTriggers'
+import {
+  ProfitTrailer,
+  buildSessionGates,
+  canOpenNewTrade,
+  hitOverallLimit,
+  isPastNextDaySquareOff,
+  isPastSquareOff,
+  maxTradeCycleFor,
+} from '../engine/sessionGates'
+import type { SessionGates } from '../engine/sessionGates'
 import { initialStopAndTarget, updateTrailing } from '../engine/backtestEngine'
 import { recordClosedTrade } from '../risk/riskManager'
 import { bucketStartFor, TIMEFRAME_MINUTES } from './candleAggregator'
@@ -63,6 +73,13 @@ export class StrategyRuntime {
   private pendingExitReason: LiveExitReason | null = null
   private stopped = false
   private firedLegs = new Set<string>()
+  /** Order Type + Risk Management gates (defaults applied for legacy strategies). */
+  private readonly gates: SessionGates
+  private readonly trailer: ProfitTrailer
+  /** Realized P&L for the current IST day — drives overall limits + trailing. */
+  private realizedPnlToday = 0
+  /** Set once an overall limit / trailing floor booked the strategy for the day. */
+  private haltedForDay = false
 
   private constructor(
     private readonly strategy: StrategyRow,
@@ -72,6 +89,8 @@ export class StrategyRuntime {
     this.indicatorRt = new IndicatorRuntime(collectIndicatorSpecs(rules))
     this.timeSqMinutes = rules.exit.timeSquareOff ? hhmmToMinutes(rules.exit.timeSquareOff.time) : null
     this.timeframeMinutes = TIMEFRAME_MINUTES[strategy.timeframe] ?? 1
+    this.gates = buildSessionGates(rules)
+    this.trailer = new ProfitTrailer(this.gates.riskManagement)
   }
 
   get id(): string {
@@ -186,6 +205,10 @@ export class StrategyRuntime {
       this.tradesDayKey = dayKey
       this.tradesToday = 0
       this.firedLegs = new Set<string>() // fresh time-trigger schedule each IST day
+      // Risk Management limits scope to the IST day, same as the trade cap.
+      this.realizedPnlToday = 0
+      this.haltedForDay = false
+      this.trailer.reset()
     }
 
     // ── Position management (mirror of runBacktestCore's bar handling) ──
@@ -193,10 +216,33 @@ export class StrategyRuntime {
       const s = this.positionState
       s.barsHeld++
       const long = this.position.side === 'LONG'
-      const cutoffHit = this.timeSqMinutes != null && istMinutesOfDay(candle.time) >= this.timeSqMinutes
+      // Order Type square-off: MIS/CNC same-day; BTST at the next-day time.
+      const orderTypeCutoff =
+        this.gates.orderType.type === 'BTST'
+          ? isPastNextDaySquareOff(this.gates, new Date(this.position.opened_at), candle.time)
+          : isPastSquareOff(this.gates, candle.time)
+      const cutoffHit =
+        orderTypeCutoff || (this.timeSqMinutes != null && istMinutesOfDay(candle.time) >= this.timeSqMinutes)
       const maxHoldingHit = this.rules.exit.maxHoldingBars != null && s.barsHeld >= this.rules.exit.maxHoldingBars
 
-      if (cutoffHit) {
+      // Risk Management: overall profit/loss + profit trailing on running P&L.
+      const entryPrice = Number(this.position.average_entry_price)
+      const openPnl =
+        (long ? candle.close - entryPrice : entryPrice - candle.close) * this.position.quantity
+      const runningPnl = this.realizedPnlToday + openPnl
+      const overallHit = hitOverallLimit(this.gates.riskManagement, runningPnl)
+      const trailingHit = this.trailer.shouldBook(runningPnl)
+
+      if (overallHit === 'profit') {
+        this.haltedForDay = true
+        await this.requestExit('overall_profit', candle.close)
+      } else if (overallHit === 'loss') {
+        this.haltedForDay = true
+        await this.requestExit('overall_loss', candle.close)
+      } else if (trailingHit) {
+        this.haltedForDay = true
+        await this.requestExit('profit_trailing', candle.close)
+      } else if (cutoffHit) {
         await this.requestExit('time_squareoff', candle.close)
       } else if (maxHoldingHit) {
         await this.requestExit('max_holding', candle.close)
@@ -229,9 +275,18 @@ export class StrategyRuntime {
 
     // ── Entries (fresh buckets only, backtest gate ordering preserved) ──
     const fresh = tMs >= this.firstLiveBucketMs
-    if (fresh && !this.position && !this.inflight) {
-      const pastCutoff = this.timeSqMinutes != null && istMinutesOfDay(candle.time) >= this.timeSqMinutes
-      const underTradeLimit = this.tradesToday < this.rules.risk.maxTradesPerDay
+    if (fresh && !this.position && !this.inflight && !this.haltedForDay) {
+      const pastCutoff =
+        (this.timeSqMinutes != null && istMinutesOfDay(candle.time) >= this.timeSqMinutes) ||
+        // Order Type session window + allowed trading days, and the Risk
+        // Management "No Trade After" cutoff.
+        !canOpenNewTrade(this.gates, candle.time)
+      const configuredCycle = maxTradeCycleFor(this.gates)
+      const cycleLimit =
+        configuredCycle != null
+          ? Math.min(this.rules.risk.maxTradesPerDay, configuredCycle)
+          : this.rules.risk.maxTradesPerDay
+      const underTradeLimit = this.tradesToday < cycleLimit
 
       // Resolve entry intent (mirrors runBacktestCore): time-triggered legs,
       // leg-defined signal entries, or classic direction-based signal entry.
@@ -435,6 +490,7 @@ export class StrategyRuntime {
     const entryPrice = Number(position.average_entry_price)
     const gross = (position.side === 'LONG' ? exitPrice - entryPrice : entryPrice - exitPrice) * position.quantity
     const pnl = Math.round(gross * 100) / 100
+    this.realizedPnlToday += pnl
     try {
       await ledger.closePosition(position.id, { exitPrice, reason })
     } catch (err) {

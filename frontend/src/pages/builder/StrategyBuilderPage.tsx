@@ -9,7 +9,14 @@ import StrategyTypeSelector from './StrategyTypeSelector'
 import StocksFuturesForm from './StocksFuturesForm'
 import OptionIndicatorForm from './OptionIndicatorForm'
 import OptionTimeForm from './OptionTimeForm'
-import { fromStrategyRow, initialBuilderState, toRules } from './builderState'
+import {
+  configErrors,
+  fromStrategyRow,
+  initialBuilderState,
+  toOrderTypeConfig,
+  toRiskManagementConfig,
+  toRules,
+} from './builderState'
 import type { BuilderState, StrategyType } from './builderState'
 
 function validateBuilderState(state: BuilderState): string[] {
@@ -23,15 +30,15 @@ function validateBuilderState(state: BuilderState): string[] {
   }
 
   // Type-specific validation
+  // Order Type + Risk Management (shared with the backend validators).
+  errors.push(...configErrors(state))
+
   if (state.strategyType === 'stocks-futures') {
     if (state.instruments.length === 0) {
       errors.push('Select at least 1 instrument')
     }
     if (state.longEntryConditions.length === 0 && state.shortEntryConditions.length === 0) {
       errors.push('Add at least one Long or Short entry condition')
-    }
-    if (state.startTime >= state.squareOffTime) {
-      errors.push('Start time must be before Square Off time')
     }
   }
 
@@ -48,9 +55,6 @@ function validateBuilderState(state: BuilderState): string[] {
     if (state.longEntryConditions.length === 0 && state.shortEntryConditions.length === 0) {
       errors.push('Add at least one Long or Short entry condition')
     }
-    if (state.startTime >= state.squareOffTime) {
-      errors.push('Start time must be before Square Off time')
-    }
   }
 
   if (state.strategyType === 'option-time') {
@@ -59,9 +63,6 @@ function validateBuilderState(state: BuilderState): string[] {
     }
     if (state.legs.length > 0 && state.legs.every((l) => !l.entryTime)) {
       errors.push('Set an Entry Time on at least one leg')
-    }
-    if (state.startTime >= state.squareOffTime) {
-      errors.push('Start time must be before Square Off time')
     }
   }
 
@@ -91,7 +92,7 @@ export default function StrategyBuilderPage() {
   const rulesValidation = useMemo(() => validateStrategyRules(rules), [rules])
 
   const allErrors = useMemo(() => {
-    const errs = [...validationErrors]
+    const errs = [...new Set(validationErrors)]
     if (!rulesValidation.valid) {
       rulesValidation.errors.forEach((e) => {
         if (!errs.includes(e)) errs.push(e)
@@ -130,6 +131,10 @@ export default function StrategyBuilderPage() {
         strategyType: state.strategyType,
         timeframe: state.interval || state.timeframe,
         rules,
+        // Also sent at the payload root per the documented API shape; the
+        // backend folds them into `rules` (the engines' source of truth).
+        orderType: toOrderTypeConfig(state),
+        riskManagement: toRiskManagementConfig(state),
       }
       const saved = state.id
         ? await strategyApi.update(state.id, payload)

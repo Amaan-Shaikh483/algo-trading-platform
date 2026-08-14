@@ -30,9 +30,12 @@ strategiesRouter.get(
 strategiesRouter.post(
   '/',
   asyncRoute(async (req, res) => {
-    const { name, description, instrument, symbolToken, exchange, segment, timeframe, rules } = (req.body ?? {}) as Record<string, never>
+    const { name, description, instrument, symbolToken, exchange, segment, timeframe, rules, orderType, riskManagement } =
+      (req.body ?? {}) as Record<string, never>
     res.status(201).json(
-      await strategyService.createStrategy(req.userId!, { name, description, instrument, symbolToken, exchange, segment, timeframe, rules }),
+      await strategyService.createStrategy(req.userId!, {
+        name, description, instrument, symbolToken, exchange, segment, timeframe, rules, orderType, riskManagement,
+      }),
     )
   }),
 )
@@ -40,10 +43,11 @@ strategiesRouter.post(
 strategiesRouter.put(
   '/:id',
   asyncRoute(async (req, res) => {
-    const { name, description, instrument, symbolToken, exchange, segment, timeframe, rules } = (req.body ?? {}) as Record<string, never>
+    const { name, description, instrument, symbolToken, exchange, segment, timeframe, rules, orderType, riskManagement } =
+      (req.body ?? {}) as Record<string, never>
     res.json(
       await strategyService.updateStrategy(req.userId!, req.params.id, {
-        name, description, instrument, symbolToken, exchange, segment, timeframe, rules,
+        name, description, instrument, symbolToken, exchange, segment, timeframe, rules, orderType, riskManagement,
       }),
     )
   }),

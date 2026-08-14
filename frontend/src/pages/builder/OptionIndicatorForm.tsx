@@ -4,13 +4,10 @@ import OperandEditor from '../../components/OperandEditor'
 import { OPERATORS } from '@algo/rule-schema'
 import type { Condition, Operator } from '@algo/rule-schema'
 import OptionLegCard from './OptionLegCard'
-import {
-  ORDER_TYPE_OPTIONS,
-  PROFIT_TRAILING_OPTIONS,
-  newOptionLeg,
-  newCondition,
-} from './builderState'
-import type { BuilderState, Underlying, ProfitTrailing } from './builderState'
+import OrderTypeSection from './OrderTypeSection'
+import RiskManagementSection from './RiskManagementSection'
+import { newOptionLeg, newCondition } from './builderState'
+import type { BuilderState, Underlying } from './builderState'
 
 // ── Predefined Instruments for Option Trading ───────────────────────────────
 
@@ -208,12 +205,6 @@ function StrategyLegsSection({
 
 // ── Entry Conditions (Long / Short Pairs) Section ──────────────────────────
 
-interface ConditionPair {
-  id: string
-  longCondition: Condition
-  shortCondition: Condition
-}
-
 function EntryConditionsSection({
   longConditions,
   shortConditions,
@@ -392,83 +383,6 @@ function ExitConditionsSection({
   )
 }
 
-// ── Risk Management Section ──────────────────────────────────────────────────
-
-function RiskManagementSection({
-  exitProfitAmount,
-  exitLossAmount,
-  maxTradeCycle,
-  noTradeAfter,
-  profitTrailing,
-  onFieldChange,
-}: {
-  exitProfitAmount: string
-  exitLossAmount: string
-  maxTradeCycle: string
-  noTradeAfter: string
-  profitTrailing: ProfitTrailing
-  onFieldChange: (field: string, value: string) => void
-}) {
-  return (
-    <SectionCard title="Risk Management">
-      <div className="space-y-4">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <TextInput
-            label="Exit Profit (INR)"
-            type="number"
-            min={0}
-            value={exitProfitAmount}
-            onChange={(e) => onFieldChange('exitProfitAmount', e.target.value)}
-            placeholder="e.g. 5000"
-            hint="Book the whole strategy when unrealized + realized profit reaches this amount."
-          />
-          <TextInput
-            label="Exit Loss (INR)"
-            type="number"
-            min={0}
-            value={exitLossAmount}
-            onChange={(e) => onFieldChange('exitLossAmount', e.target.value)}
-            placeholder="e.g. 1000"
-            hint="Positive INR amount. Mapped to the strategy stop-loss (also accepts a negative loss figure)."
-          />
-        </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <TextInput
-            label="Max Trade Cycle"
-            type="number"
-            min={1}
-            value={maxTradeCycle}
-            onChange={(e) => onFieldChange('maxTradeCycle', e.target.value)}
-          />
-          <TextInput
-            label="No Trade After"
-            type="time"
-            value={noTradeAfter}
-            onChange={(e) => onFieldChange('noTradeAfter', e.target.value)}
-          />
-        </div>
-
-        <Field label="Profit Trailing">
-          <div className="flex flex-wrap gap-2">
-            {PROFIT_TRAILING_OPTIONS.map((opt) => (
-              <button
-                key={opt}
-                type="button"
-                onClick={() => onFieldChange('profitTrailing', opt)}
-                className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                  profitTrailing === opt ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
-                }`}
-              >
-                {opt}
-              </button>
-            ))}
-          </div>
-        </Field>
-      </div>
-    </SectionCard>
-  )
-}
-
 // ── Main Option Indicator Form ───────────────────────────────────────────────
 
 interface Props {
@@ -477,10 +391,6 @@ interface Props {
 }
 
 export default function OptionIndicatorForm({ state, patch }: Props) {
-  const handleRiskFieldChange = (field: string, value: string) => {
-    patch({ [field]: value } as Partial<BuilderState>)
-  }
-
   // Auto-update all leg quantities when underlying instrument changes
   const handleInstrumentChange = (instrument: BuilderState['underlyingInstrument']) => {
     const lotSize = getLotSize(instrument)
@@ -498,48 +408,9 @@ export default function OptionIndicatorForm({ state, patch }: Props) {
         onInstrumentChange={handleInstrumentChange}
       />
 
-      <SectionCard title="Order Type">
-        <div className="flex flex-wrap gap-3">
-          {ORDER_TYPE_OPTIONS.map((opt) => (
-            <label
-              key={opt.value}
-              className={`flex cursor-pointer items-center gap-2 rounded-xl border px-4 py-2.5 transition-colors ${
-                state.optOrderType === opt.value
-                  ? 'border-brand-300 bg-brand-50 text-brand-700'
-                  : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
-              }`}
-            >
-              <input
-                type="radio"
-                name="optOrderType"
-                value={opt.value}
-                checked={state.optOrderType === opt.value}
-                onChange={() => patch({ optOrderType: opt.value })}
-                className="h-4 w-4 accent-brand-600"
-              />
-              <span className="text-sm font-semibold">{opt.label}</span>
-              <span className="text-xs text-gray-400">({opt.desc})</span>
-            </label>
-          ))}
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Timing">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <TextInput
-            label="Start Time"
-            type="time"
-            value={state.startTime}
-            onChange={(e) => patch({ startTime: e.target.value })}
-          />
-          <TextInput
-            label="Square Off Time"
-            type="time"
-            value={state.squareOffTime}
-            onChange={(e) => patch({ squareOffTime: e.target.value })}
-          />
-        </div>
-      </SectionCard>
+      {/* Order Type (MIS / CNC / BTST) — start time, square off and trading
+          days live inside this section and swap with the selection. */}
+      <OrderTypeSection state={state} patch={patch} name="optIndicatorOrderType" field="optOrderType" />
 
       <StrategyLegsSection legs={state.legs} onChange={(legs) => patch({ legs })} underlyingInstrument={state.underlyingInstrument} />
 
@@ -557,14 +428,7 @@ export default function OptionIndicatorForm({ state, patch }: Props) {
         onConditionsChange={(exitConditions) => patch({ exitConditions })}
       />
 
-      <RiskManagementSection
-        exitProfitAmount={state.exitProfitAmount}
-        exitLossAmount={state.exitLossAmount}
-        maxTradeCycle={state.maxTradeCycle}
-        noTradeAfter={state.noTradeAfter}
-        profitTrailing={state.profitTrailing}
-        onFieldChange={handleRiskFieldChange}
-      />
+      <RiskManagementSection state={state} patch={patch} name="optIndicatorProfitTrailing" />
 
       <SectionCard title="Strategy Name">
         <TextInput
