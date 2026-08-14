@@ -1,5 +1,5 @@
 import { apiDelete, apiGet, apiPost, apiRequest } from './api'
-import type { StrategyRules } from '@algo/rule-schema'
+import type { OrderTypeConfig, RiskManagementConfig, StrategyRules } from '@algo/rule-schema'
 
 export interface StrategyRowView {
   id: string
@@ -13,6 +13,10 @@ export interface StrategyRowView {
   timeframe: string
   rules: StrategyRules
   risk_settings: unknown
+  /** Order Type block mirrored from rules.orderType (null on pre-feature rows). */
+  order_type: OrderTypeConfig | null
+  /** Risk Management block mirrored from rules.riskManagement. */
+  risk_management: RiskManagementConfig | null
   mode: 'paper' | 'live'
   is_active: boolean
   version: number
@@ -41,6 +45,9 @@ export interface StrategyPayload {
   segment: string
   timeframe: string
   rules: StrategyRules
+  /** Optional top-level blocks (the backend folds them into `rules`). */
+  orderType?: OrderTypeConfig
+  riskManagement?: RiskManagementConfig
 }
 
 const apiPut = <T>(path: string, body?: unknown) => apiRequest<T>('PUT', path, body ?? {})

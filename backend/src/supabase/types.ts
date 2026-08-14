@@ -92,6 +92,10 @@ export type StrategyRow = {
   short_entry_conditions: Json | null
   /** Option strategy legs (mirrors rules.legs). */
   legs: Json | null
+  /** Order Type block: MIS/CNC/BTST + session window + trading days (mirrors rules.orderType). */
+  order_type: Json | null
+  /** Risk Management block incl. profit trailing (mirrors rules.riskManagement). */
+  risk_management: Json | null
   mode: 'paper' | 'live'
   is_active: boolean
   version: number

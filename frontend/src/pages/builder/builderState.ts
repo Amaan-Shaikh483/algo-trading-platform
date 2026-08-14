@@ -1,16 +1,30 @@
-import { RULE_SCHEMA_VERSION, defaultRules, newConditionId } from '@algo/rule-schema'
+import {
+  RULE_SCHEMA_VERSION,
+  TRADING_DAYS,
+  defaultTradingDays,
+  newConditionId,
+  normalizeOrderType,
+  normalizeRiskManagement,
+  productTypeForOrderType,
+  defaultRules,
+} from '@algo/rule-schema'
 import type {
   Condition,
   ConditionGroup,
   ExitRules,
   OrderType,
+  OrderTypeConfig,
   ProductType,
+  ProfitTrailingConfig,
+  ProfitTrailingType,
+  RiskManagementConfig,
   Segment,
   StopLossRule,
   StrategyRuleLeg,
   StrategyRules,
   TargetRule,
   Timeframe,
+  TradingDay,
   TrailingSlRule,
 } from '@algo/rule-schema'
 import type { InstrumentHit } from '../../lib/instrumentApi'
@@ -32,6 +46,34 @@ export type OrderTypeNew = 'MIS' | 'CNC' | 'BTST'
 export type TransactionType = 'Both Side' | 'Only Long' | 'Only Short'
 export type ChartType = 'Candle' | 'Heikin Ashi'
 export type ProfitTrailing = 'No Trailing' | 'Lock Fix' | 'Trail' | 'Lock & Trail'
+
+/** UI label ↔ persisted enum for the Profit Trailing radio group. */
+export const PROFIT_TRAILING_MAP: Record<ProfitTrailing, ProfitTrailingType> = {
+  'No Trailing': 'NO_TRAILING',
+  'Lock Fix': 'LOCK_FIX_PROFIT',
+  Trail: 'TRAIL_PROFIT',
+  'Lock & Trail': 'LOCK_AND_TRAIL',
+}
+
+export const PROFIT_TRAILING_LABELS: Record<ProfitTrailingType, ProfitTrailing> = {
+  NO_TRAILING: 'No Trailing',
+  LOCK_FIX_PROFIT: 'Lock Fix',
+  TRAIL_PROFIT: 'Trail',
+  LOCK_AND_TRAIL: 'Lock & Trail',
+}
+
+/** Long-form captions shown next to each Profit Trailing radio. */
+export const PROFIT_TRAILING_DESCRIPTIONS: Record<ProfitTrailing, string> = {
+  'No Trailing': 'No additional profit protection',
+  'Lock Fix': 'Lock a fixed profit once a threshold is hit',
+  Trail: 'Trail profit upward as gains increase',
+  'Lock & Trail': 'Lock a floor, then keep trailing above it',
+}
+
+export const TRADING_DAY_OPTIONS: readonly TradingDay[] = TRADING_DAYS
+
+export const CNC_SLIDER_MIN = 0
+export const CNC_SLIDER_MAX = 4
 
 export const ORDER_TYPE_OPTIONS: { value: OrderTypeNew; label: string; desc: string }[] = [
   { value: 'MIS', label: 'MIS', desc: 'Intraday' },
@@ -132,12 +174,29 @@ export interface BuilderState {
   exitConditionsEnabled: boolean
   exitConditions: Condition[]
 
+  // Order Type configuration (shared — MIS / CNC / BTST)
+  /** Trading days the strategy may run (MON…FRI). */
+  tradingDays: TradingDay[]
+  /** BTST only — square off on the following session. */
+  nextDaySquareOffTime: string
+  /** CNC only — entry N trading days before expiry (0…4). */
+  cncEntryDaysBeforeExpiry: number
+  /** CNC only — exit N trading days before expiry (0…4). */
+  cncExitDaysBeforeExpiry: number
+  /** UI-only: CNC Settings card expanded/collapsed. */
+  cncSettingsOpen: boolean
+
   // Risk management (shared)
   exitProfitAmount: string
   exitLossAmount: string
   maxTradeCycle: string
   noTradeAfter: string
   profitTrailing: ProfitTrailing
+  /** Profit trailing values — required only for the selected trailing mode. */
+  trailIfProfitReaches: string
+  trailLockProfitAt: string
+  trailOnEveryIncreaseOf: string
+  trailProfitBy: string
 
   // Legacy compat fields (used for save/load with backend)
   segment: Segment
@@ -220,6 +279,13 @@ export function initialBuilderState(): BuilderState {
     sfOrderType: 'MIS',
     startTime: '09:16',
     squareOffTime: '15:10',
+
+    // Order Type configuration
+    tradingDays: defaultTradingDays(),
+    nextDaySquareOffTime: '15:10',
+    cncEntryDaysBeforeExpiry: 4,
+    cncExitDaysBeforeExpiry: 0,
+    cncSettingsOpen: true,
     transactionType: 'Both Side',
     chartType: 'Candle',
     interval: '5m',
@@ -244,6 +310,10 @@ export function initialBuilderState(): BuilderState {
     maxTradeCycle: '1',
     noTradeAfter: '15:10',
     profitTrailing: 'No Trailing',
+    trailIfProfitReaches: '',
+    trailLockProfitAt: '',
+    trailOnEveryIncreaseOf: '',
+    trailProfitBy: '',
 
     // Legacy compat
     segment: 'equity',
@@ -421,9 +491,71 @@ function deriveExit(state: BuilderState): ExitRules {
 
 /** Map new order type to legacy product type for backend compat. */
 function toProductType(ot: OrderTypeNew): ProductType {
-  if (ot === 'MIS') return 'INTRADAY'
-  if (ot === 'CNC') return 'DELIVERY'
-  return 'BTST'
+  return productTypeForOrderType(ot)
+}
+
+/** Which order-type selector applies to the active strategy type. */
+export function activeOrderType(state: BuilderState): OrderTypeNew {
+  return state.strategyType === 'stocks-futures' ? state.sfOrderType : state.optOrderType
+}
+
+/**
+ * Build the persisted Order Type block. Only the fields relevant to the
+ * selected type are emitted — CNC settings never leak into a MIS strategy and
+ * BTST's next-day square off is null for MIS/CNC.
+ */
+export function toOrderTypeConfig(state: BuilderState): OrderTypeConfig {
+  const type = activeOrderType(state)
+  return {
+    type,
+    startTime: state.startTime,
+    squareOffTime: type === 'BTST' ? null : state.squareOffTime,
+    nextDaySquareOffTime: type === 'BTST' ? state.nextDaySquareOffTime : null,
+    tradingDays: [...state.tradingDays],
+    ...(type === 'CNC'
+      ? {
+          cnc: {
+            entryDaysBeforeExpiry: state.cncEntryDaysBeforeExpiry,
+            exitDaysBeforeExpiry: state.cncExitDaysBeforeExpiry,
+          },
+        }
+      : {}),
+  }
+}
+
+/**
+ * Build the persisted Risk Management block. Trailing values are emitted only
+ * for the selected mode, so switching modes never persists stale numbers.
+ */
+export function toRiskManagementConfig(state: BuilderState): RiskManagementConfig {
+  const type = PROFIT_TRAILING_MAP[state.profitTrailing] ?? 'NO_TRAILING'
+  const needsLock = type === 'LOCK_FIX_PROFIT' || type === 'LOCK_AND_TRAIL'
+  const needsTrail = type === 'TRAIL_PROFIT' || type === 'LOCK_AND_TRAIL'
+  const n = (raw: string): number | undefined => {
+    const v = raw?.trim()
+    if (!v) return undefined
+    const parsed = Number(v)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  const profitTrailing: ProfitTrailingConfig = {
+    type,
+    ...(needsLock && n(state.trailIfProfitReaches) != null ? { ifProfitReaches: n(state.trailIfProfitReaches)! } : {}),
+    ...(needsLock && n(state.trailLockProfitAt) != null ? { lockProfitAt: n(state.trailLockProfitAt)! } : {}),
+    ...(needsTrail && n(state.trailOnEveryIncreaseOf) != null
+      ? { onEveryIncreaseOf: n(state.trailOnEveryIncreaseOf)! }
+      : {}),
+    ...(needsTrail && n(state.trailProfitBy) != null ? { trailProfitBy: n(state.trailProfitBy)! } : {}),
+  }
+  const exitProfit = parsePositiveAmount(state.exitProfitAmount)
+  const exitLoss = parsePositiveAmount(state.exitLossAmount)
+  const cycles = Number(state.maxTradeCycle)
+  return {
+    ...(exitProfit != null ? { exitProfit } : {}),
+    ...(exitLoss != null ? { exitLoss } : {}),
+    maxTradeCycle: Number.isFinite(cycles) && cycles >= 1 ? Math.round(cycles) : 1,
+    noTradeAfter: state.noTradeAfter,
+    profitTrailing,
+  }
 }
 
 function groupOf(conditions: Condition[]): ConditionGroup | undefined {
@@ -504,6 +636,8 @@ export function toRules(state: BuilderState): StrategyRules {
       maxConcurrentPositions: num(state.risk.maxPositions),
       maxTradesPerDay: num(state.risk.maxTradesPerDay),
     },
+    orderType: toOrderTypeConfig(state),
+    riskManagement: toRiskManagementConfig(state),
   }
 }
 
@@ -570,7 +704,6 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
     direction: r.direction.side,
     orderType: r.entry.orderType,
     productType: r.entry.productType,
-    sfOrderType: r.entry.productType === 'INTRADAY' ? 'MIS' : r.entry.productType === 'DELIVERY' ? 'CNC' : 'BTST',
     combinator: r.entryConditions.combinator,
     entryConditions: r.entryConditions.conditions,
     longEntryConditions: r.longEntryConditions?.conditions ?? (r.direction.side === 'long' ? r.entryConditions.conditions : []),
@@ -579,9 +712,35 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
       const hydrated = hydrateLegs(r.legs)
       return hydrated.length > 0 ? hydrated : initialBuilderState().legs
     })(),
-    squareOffTime: r.exit.timeSquareOff?.time ?? '15:10',
-    exitProfitAmount: restoredProfit,
-    exitLossAmount: restoredLoss,
+    ...(() => {
+      // Order Type + Risk Management restore. normalize* derives sane values
+      // for strategies saved before the feature existed, so editing an old
+      // strategy never opens with blank/incorrect sections.
+      const ot = normalizeOrderType(r)
+      const rm = normalizeRiskManagement(r)
+      const trailing = rm.profitTrailing
+      const str = (v: number | undefined): string => (v == null ? '' : String(v))
+      return {
+        sfOrderType: ot.type,
+        optOrderType: ot.type,
+        startTime: ot.startTime,
+        squareOffTime: ot.squareOffTime ?? '15:10',
+        nextDaySquareOffTime: ot.nextDaySquareOffTime ?? '15:10',
+        tradingDays: ot.tradingDays,
+        cncEntryDaysBeforeExpiry: ot.cnc?.entryDaysBeforeExpiry ?? 4,
+        cncExitDaysBeforeExpiry: ot.cnc?.exitDaysBeforeExpiry ?? 0,
+        cncSettingsOpen: true,
+        maxTradeCycle: String(rm.maxTradeCycle),
+        noTradeAfter: rm.noTradeAfter,
+        profitTrailing: PROFIT_TRAILING_LABELS[trailing.type] ?? 'No Trailing',
+        trailIfProfitReaches: str(trailing.ifProfitReaches),
+        trailLockProfitAt: str(trailing.lockProfitAt),
+        trailOnEveryIncreaseOf: str(trailing.onEveryIncreaseOf),
+        trailProfitBy: str(trailing.trailProfitBy),
+        exitProfitAmount: rm.exitProfit != null ? String(rm.exitProfit) : restoredProfit,
+        exitLossAmount: rm.exitLoss != null ? String(rm.exitLoss) : restoredLoss,
+      }
+    })(),
     exit: {
       slEnabled: r.exit.stopLoss != null && Number(r.exit.stopLoss.value) > 0,
       slType: r.exit.stopLoss?.type ?? 'points',
@@ -607,6 +766,83 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
     exitConditionsEnabled: false,
     exitConditions: [],
   }
+}
+
+/**
+ * Order Type + Risk Management validation for the builder form. Runs the SAME
+ * shared validators the backend uses (validateOrderTypeConfig /
+ * validateRiskManagementConfig) against the serialized blocks, then adds a few
+ * UI-level messages phrased in the form's own language.
+ */
+export function configErrors(state: BuilderState): string[] {
+  const errors: string[] = []
+  const type = activeOrderType(state)
+
+  if (!TIME_RE.test(state.startTime)) errors.push('Start Time must be a valid time')
+
+  if (type === 'BTST') {
+    if (!TIME_RE.test(state.nextDaySquareOffTime)) errors.push('Next Day Square Off must be a valid time')
+  } else {
+    if (!TIME_RE.test(state.squareOffTime)) errors.push('Square Off must be a valid time')
+    else if (TIME_RE.test(state.startTime) && state.startTime >= state.squareOffTime) {
+      errors.push('Start Time must be before Square Off')
+    }
+  }
+
+  if (state.tradingDays.length === 0) errors.push('Select at least one trading day')
+
+  if (type === 'CNC') {
+    for (const [label, value] of [
+      ['Entry', state.cncEntryDaysBeforeExpiry],
+      ['Exit', state.cncExitDaysBeforeExpiry],
+    ] as const) {
+      if (!Number.isInteger(value) || value < CNC_SLIDER_MIN || value > CNC_SLIDER_MAX) {
+        errors.push(`CNC ${label} days before expiry must be between ${CNC_SLIDER_MIN} and ${CNC_SLIDER_MAX}`)
+      }
+    }
+  }
+
+  // Risk management
+  for (const [label, raw] of [
+    ['Exit Profit (INR)', state.exitProfitAmount],
+    ['Exit Loss (INR)', state.exitLossAmount],
+  ] as const) {
+    const v = raw?.trim()
+    if (v && !Number.isFinite(Number(v))) errors.push(`${label} must be a valid number`)
+    else if (v && Number(v) === 0) errors.push(`${label} must not be zero`)
+  }
+
+  const cycles = Number(state.maxTradeCycle)
+  if (!state.maxTradeCycle.trim() || !Number.isFinite(cycles) || !Number.isInteger(cycles) || cycles < 1) {
+    errors.push('Max Trade Cycle must be a positive whole number')
+  }
+  if (!TIME_RE.test(state.noTradeAfter)) errors.push('No Trade After must be a valid time')
+
+  // Trailing fields are required ONLY for the selected trailing option.
+  const trailingRequirements: Record<ProfitTrailing, [string, string][]> = {
+    'No Trailing': [],
+    'Lock Fix': [
+      ['If profit reaches', state.trailIfProfitReaches],
+      ['Lock profit at', state.trailLockProfitAt],
+    ],
+    Trail: [
+      ['On every increase of', state.trailOnEveryIncreaseOf],
+      ['Trail profit by', state.trailProfitBy],
+    ],
+    'Lock & Trail': [
+      ['If profit reaches', state.trailIfProfitReaches],
+      ['Lock profit at', state.trailLockProfitAt],
+      ['On every increase of', state.trailOnEveryIncreaseOf],
+      ['Trail profit by', state.trailProfitBy],
+    ],
+  }
+  for (const [label, raw] of trailingRequirements[state.profitTrailing]) {
+    const v = raw?.trim()
+    if (!v) errors.push(`${label} is required for ${state.profitTrailing} trailing`)
+    else if (!Number.isFinite(Number(v)) || Number(v) <= 0) errors.push(`${label} must be a positive number`)
+  }
+
+  return errors
 }
 
 /** Per-step gating for the wizard's Next button. */

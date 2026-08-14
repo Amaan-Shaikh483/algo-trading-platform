@@ -4,6 +4,15 @@ import type { Candle } from '../brokers/types'
 import { IndicatorRuntime, collectIndicatorSpecs, hhmmToMinutes, istDayKey, istMinutesOfDay } from './indicatorEngine'
 import { evaluateEntrySignal } from './ruleEvaluator'
 import { hasTimeTriggeredLegs, legSide, markLegFired, pickScheduledLeg } from './timeTriggers'
+import {
+  ProfitTrailer,
+  buildSessionGates,
+  canOpenNewTrade,
+  hitOverallLimit,
+  isPastNextDaySquareOff,
+  isPastSquareOff,
+  maxTradeCycleFor,
+} from './sessionGates'
 
 /**
  * Bar-by-bar backtest engine (spec §3.5).
@@ -51,7 +60,16 @@ export interface BacktestTrade {
   grossPnl: number
   fees: number
   netPnl: number
-  exitReason: 'stop_loss' | 'trailing_stop' | 'target' | 'time_squareoff' | 'max_holding' | 'end_of_data'
+  exitReason:
+    | 'stop_loss'
+    | 'trailing_stop'
+    | 'target'
+    | 'time_squareoff'
+    | 'max_holding'
+    | 'end_of_data'
+    | 'overall_profit'
+    | 'overall_loss'
+    | 'profit_trailing'
   barsHeld: number
 }
 
@@ -243,6 +261,13 @@ export function runBacktestCore(input: {
   const { rules, candles, config } = input
   const runtime = new IndicatorRuntime(collectIndicatorSpecs(rules))
   const timeSqMinutes = rules.exit.timeSquareOff ? hhmmToMinutes(rules.exit.timeSquareOff.time) : null
+  // Order Type / Risk Management gates (defaults applied for legacy strategies).
+  const gates = buildSessionGates(rules)
+  const trailer = new ProfitTrailer(gates.riskManagement)
+  /** Realized P&L across the whole run — drives overall profit/loss + trailing. */
+  let realizedPnl = 0
+  /** Set once an overall limit or the trailing floor books the strategy. */
+  let strategyHalted = false
 
   let capital = config.initialCapital
   let position: Position | null = null
@@ -268,6 +293,7 @@ export function runBacktestCore(input: {
     const fees = position.entryFee + exitFee
     const netPnl = gross - fees
     capital += netPnl
+    realizedPnl += netPnl
     trades.push({
       side: position.side,
       quantity: position.quantity,
@@ -284,20 +310,58 @@ export function runBacktestCore(input: {
     position = null
   }
 
+  let pnlDayKey = ''
+
   for (let i = 0; i < candles.length; i++) {
     const candle = candles[i]
     runtime.update(candle)
     const frame = { current: candle, previous: i > 0 ? candles[i - 1] : undefined, runtime }
+
+    // Overall profit/loss limits, the trailing floor and the halt flag are
+    // per-IST-day gates (same scope as the daily trade cap) — reset at rollover.
+    const candleDayKey = istDayKey(candle.time)
+    if (candleDayKey !== pnlDayKey) {
+      pnlDayKey = candleDayKey
+      realizedPnl = 0
+      strategyHalted = false
+      trailer.reset()
+    }
 
     // ── Manage open position ──
     if (position) {
       position.barsHeld++
       barsInPosition++
 
-      const cutoffHit = timeSqMinutes != null && istMinutesOfDay(candle.time) >= timeSqMinutes
+      // Order Type square-off: MIS/CNC close same day at the configured time;
+      // BTST carries overnight and closes at the next-day square-off time.
+      const orderTypeCutoff =
+        gates.orderType.type === 'BTST'
+          ? isPastNextDaySquareOff(gates, position.entryTime, candle.time)
+          : isPastSquareOff(gates, candle.time)
+      const cutoffHit =
+        orderTypeCutoff || (timeSqMinutes != null && istMinutesOfDay(candle.time) >= timeSqMinutes)
       const maxHoldingHit = rules.exit.maxHoldingBars != null && position.barsHeld >= rules.exit.maxHoldingBars
 
-      if (cutoffHit) {
+      // Risk Management: overall profit/loss limits and the profit-trailing
+      // floor evaluate on the running (realized + unrealized) strategy P&L.
+      const openPnl =
+        position.side === 'LONG'
+          ? (candle.close - position.entryPrice) * position.quantity
+          : (position.entryPrice - candle.close) * position.quantity
+      const runningPnl = realizedPnl + openPnl
+      const overallHit = hitOverallLimit(gates.riskManagement, runningPnl)
+      const trailingHit = trailer.shouldBook(runningPnl)
+
+      if (overallHit === 'profit') {
+        closePosition(candle, i, candle.close, 'overall_profit')
+        strategyHalted = true
+      } else if (overallHit === 'loss') {
+        closePosition(candle, i, candle.close, 'overall_loss')
+        strategyHalted = true
+      } else if (trailingHit) {
+        closePosition(candle, i, candle.close, 'profit_trailing')
+        strategyHalted = true
+      } else if (cutoffHit) {
         closePosition(candle, i, candle.close, 'time_squareoff')
       } else if (maxHoldingHit) {
         closePosition(candle, i, candle.close, 'max_holding')
@@ -347,12 +411,21 @@ export function runBacktestCore(input: {
     drawdownPoints.push({ t: candle.time.toISOString(), drawdown: round2(drawdown) })
     dailyEquity.set(istDayKey(candle.time), equity)
 
-    // ── Entries (only when flat) ──
-    if (!position) {
+    // ── Entries (only when flat, and only while the strategy is live) ──
+    if (!position && !strategyHalted) {
       const dayKey = istDayKey(candle.time)
       const tradesToday = tradesPerDay.get(dayKey) ?? 0
-      const pastCutoff = timeSqMinutes != null && istMinutesOfDay(candle.time) >= timeSqMinutes
-      const underTradeLimit = tradesToday < rules.risk.maxTradesPerDay
+      const pastCutoff =
+        (timeSqMinutes != null && istMinutesOfDay(candle.time) >= timeSqMinutes) ||
+        // Order Type session window + allowed trading days, and the Risk
+        // Management "No Trade After" cutoff.
+        !canOpenNewTrade(gates, candle.time)
+      // Max Trade Cycle caps entry→exit cycles per day alongside
+      // maxTradesPerDay — only when the strategy actually configured it.
+      const configuredCycle = maxTradeCycleFor(gates)
+      const cycleLimit =
+        configuredCycle != null ? Math.min(rules.risk.maxTradesPerDay, configuredCycle) : rules.risk.maxTradesPerDay
+      const underTradeLimit = tradesToday < cycleLimit
 
       // Resolve this bar's entry intent:
       //   - time-triggered legs (option-time) → schedule by leg.entryTime;

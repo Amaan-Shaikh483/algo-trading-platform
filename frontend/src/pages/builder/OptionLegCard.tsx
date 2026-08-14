@@ -15,9 +15,22 @@ interface Props {
   canRemove: boolean
   /** Show the time-based entry trigger input (option-time strategy). */
   showEntryTime?: boolean
+  /**
+   * Underlying lot size — quantity is stepped in whole lots so a leg can never
+   * hold a non-tradeable size. Defaults to 1 for instruments without one.
+   */
+  lotSize?: number
 }
 
-export default function OptionLegCard({ leg, onUpdate, onRemove, canRemove, showEntryTime = false }: Props) {
+export default function OptionLegCard({
+  leg,
+  onUpdate,
+  onRemove,
+  canRemove,
+  showEntryTime = false,
+  lotSize = 1,
+}: Props) {
+  const step = Math.max(1, lotSize)
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
       {/* Header */}
@@ -124,7 +137,7 @@ export default function OptionLegCard({ leg, onUpdate, onRemove, canRemove, show
           <span className="mb-1 block text-[11px] font-medium text-gray-500">Qty</span>
           <div className="flex items-center gap-1">
             <button
-              onClick={() => onUpdate({ qty: Math.max(1, leg.qty - 1) })}
+              onClick={() => onUpdate({ qty: Math.max(step, leg.qty - step) })}
               className="rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm font-bold text-gray-500 hover:bg-gray-100"
             >
               −
@@ -134,10 +147,11 @@ export default function OptionLegCard({ leg, onUpdate, onRemove, canRemove, show
               min={1}
               value={leg.qty}
               onChange={(e) => onUpdate({ qty: Math.max(1, Number(e.target.value)) })}
+              step={step}
               className={smallInputCls + ' text-center'}
             />
             <button
-              onClick={() => onUpdate({ qty: leg.qty + 1 })}
+              onClick={() => onUpdate({ qty: leg.qty + step })}
               className="rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm font-bold text-gray-500 hover:bg-gray-100"
             >
               +

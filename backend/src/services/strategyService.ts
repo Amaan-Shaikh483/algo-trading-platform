@@ -5,9 +5,12 @@ import {
   RULE_SCHEMA_VERSION,
   SEGMENTS,
   TIMEFRAMES,
+  normalizeOrderType,
+  normalizeRiskManagement,
+  productTypeForOrderType,
   validateStrategyRules,
 } from '@algo/rule-schema'
-import type { StrategyRules } from '@algo/rule-schema'
+import type { OrderTypeConfig, RiskManagementConfig, StrategyRules } from '@algo/rule-schema'
 import type { StrategyRow } from '../supabase/types'
 
 /**
@@ -26,6 +29,24 @@ export interface StrategyInput {
   segment: string
   timeframe: string
   rules: StrategyRules
+  /**
+   * Optional top-level Order Type / Risk Management blocks. The builder sends
+   * them inside `rules` (single source of truth for the engines); accepting
+   * them at the payload root too keeps the documented API shape usable by
+   * external clients. When both are present the top-level block wins.
+   */
+  orderType?: OrderTypeConfig
+  riskManagement?: RiskManagementConfig
+}
+
+/** Fold optional top-level blocks into the rule tree before validation. */
+function mergeConfigBlocks(input: StrategyInput): StrategyRules {
+  const rules = (input.rules ?? {}) as StrategyRules
+  return {
+    ...rules,
+    ...(input.orderType != null ? { orderType: input.orderType } : {}),
+    ...(input.riskManagement != null ? { riskManagement: input.riskManagement } : {}),
+  }
 }
 
 export interface StrategyListItem extends StrategyRow {
@@ -56,6 +77,27 @@ function assertValidRules(rules: unknown): asserts rules is StrategyRules {
   if (!valid) throw new HttpError(400, `Invalid strategy rules: ${errors.join('; ')}`, 'INVALID_RULES')
 }
 
+/**
+ * Backward compatibility on READ: strategies saved before the Order Type /
+ * Risk Management feature have no `orderType` / `riskManagement` blocks (and
+ * no mirrored columns). Rather than 500-ing or handing the builder a hole, we
+ * derive both from the legacy fields (product type, exit.timeSquareOff,
+ * exit.overallProfit/LossAmount) so editing an old strategy opens with correct
+ * values. This is a pure read-time projection — nothing is written back until
+ * the user saves.
+ */
+function hydrateRow(row: StrategyRow): StrategyRow {
+  const rules = (row.rules ?? {}) as Partial<StrategyRules>
+  const orderType = normalizeOrderType(rules)
+  const riskManagement = normalizeRiskManagement(rules)
+  return {
+    ...row,
+    rules: { ...(rules as object), orderType, riskManagement } as never,
+    order_type: (row.order_type ?? orderType) as never,
+    risk_management: (row.risk_management ?? riskManagement) as never,
+  }
+}
+
 async function getOwnedRow(userId: string, id: string): Promise<StrategyRow> {
   const supabase = getServiceClient()
   const { data, error } = await supabase
@@ -66,12 +108,26 @@ async function getOwnedRow(userId: string, id: string): Promise<StrategyRow> {
     .maybeSingle()
   if (error) throw new HttpError(500, `Failed to load strategy: ${error.message}`)
   if (!data) throw new HttpError(404, 'Strategy not found', 'NOT_FOUND')
-  return data
+  return hydrateRow(data)
 }
 
 function sanitizeRules(rules: unknown): StrategyRules {
   // JSONB round-trip equivalents — no functions should have entered the object.
-  return JSON.parse(JSON.stringify(rules)) as StrategyRules
+  const parsed = JSON.parse(JSON.stringify(rules)) as StrategyRules
+  // Order Type + Risk Management are normalized on write so that:
+  //   * strategies saved before the feature existed gain sensible defaults
+  //     derived from their legacy fields instead of failing to load, and
+  //   * the persisted blob is always canonical (times validated, CNC days
+  //     clamped to 0…4, trailing fields pruned to the selected mode).
+  const orderType = normalizeOrderType(parsed)
+  const riskManagement = normalizeRiskManagement(parsed)
+  return {
+    ...parsed,
+    orderType,
+    riskManagement,
+    // Keep the broker-facing product type in step with the chosen order type.
+    entry: { ...parsed.entry, productType: productTypeForOrderType(orderType.type) },
+  }
 }
 
 export async function listStrategies(userId: string): Promise<StrategyListItem[]> {
@@ -83,7 +139,8 @@ export async function listStrategies(userId: string): Promise<StrategyListItem[]
   if (error) throw new HttpError(500, `Failed to list strategies: ${error.message}`)
   if (perfError) throw new HttpError(500, `Failed to load strategy performance: ${perfError.message}`)
   const perfById = new Map((perf ?? []).map((p) => [p.strategy_id, p]))
-  return (strategies ?? []).map((s) => {
+  return (strategies ?? []).map((raw) => {
+    const s = hydrateRow(raw)
     const p = perfById.get(s.id)
     return {
       ...s,
@@ -104,8 +161,9 @@ export async function getStrategy(userId: string, id: string): Promise<StrategyR
 
 export async function createStrategy(userId: string, input: StrategyInput): Promise<StrategyRow> {
   validateBasics(input)
-  assertValidRules(input.rules)
-  const rules = sanitizeRules(input.rules)
+  const merged = mergeConfigBlocks(input)
+  assertValidRules(merged)
+  const rules = sanitizeRules(merged)
   const supabase = getServiceClient()
   const { data, error } = await supabase
     .from('strategies')
@@ -123,6 +181,8 @@ export async function createStrategy(userId: string, input: StrategyInput): Prom
       long_entry_conditions: (rules.longEntryConditions as never) ?? null,
       short_entry_conditions: (rules.shortEntryConditions as never) ?? null,
       legs: (rules.legs as never) ?? null,
+      order_type: (rules.orderType as never) ?? null,
+      risk_management: (rules.riskManagement as never) ?? null,
       mode: 'paper', // spec 3.7: new strategies ALWAYS default to paper
       is_active: false,
       version: RULE_SCHEMA_VERSION,
@@ -130,15 +190,16 @@ export async function createStrategy(userId: string, input: StrategyInput): Prom
     .select()
     .single()
   if (error) throw new HttpError(500, `Failed to create strategy: ${error.message}`)
-  return data
+  return hydrateRow(data)
 }
 
 export async function updateStrategy(userId: string, id: string, input: StrategyInput): Promise<StrategyRow> {
   const existing = await getOwnedRow(userId, id)
   if (existing.is_active) throw new HttpError(409, 'Deactivate the strategy before editing its rules', 'ACTIVE_LOCKED')
   validateBasics(input)
-  assertValidRules(input.rules)
-  const rules = sanitizeRules(input.rules)
+  const merged = mergeConfigBlocks(input)
+  assertValidRules(merged)
+  const rules = sanitizeRules(merged)
   const supabase = getServiceClient()
   const { data, error } = await supabase
     .from('strategies')
@@ -155,13 +216,15 @@ export async function updateStrategy(userId: string, id: string, input: Strategy
       long_entry_conditions: (rules.longEntryConditions as never) ?? null,
       short_entry_conditions: (rules.shortEntryConditions as never) ?? null,
       legs: (rules.legs as never) ?? null,
+      order_type: (rules.orderType as never) ?? null,
+      risk_management: (rules.riskManagement as never) ?? null,
       version: RULE_SCHEMA_VERSION,
     })
     .eq('id', id)
     .select()
     .single()
   if (error) throw new HttpError(500, `Failed to update strategy: ${error.message}`)
-  return data
+  return hydrateRow(data)
 }
 
 export async function cloneStrategy(userId: string, id: string): Promise<StrategyRow> {
@@ -183,6 +246,8 @@ export async function cloneStrategy(userId: string, id: string): Promise<Strateg
       long_entry_conditions: source.long_entry_conditions as never,
       short_entry_conditions: source.short_entry_conditions as never,
       legs: source.legs as never,
+      order_type: source.order_type as never,
+      risk_management: source.risk_management as never,
       mode: 'paper', // clones always restart in paper mode (spec 3.7 parity)
       is_active: false,
       version: source.version,
@@ -190,7 +255,7 @@ export async function cloneStrategy(userId: string, id: string): Promise<Strateg
     .select()
     .single()
   if (error) throw new HttpError(500, `Failed to clone strategy: ${error.message}`)
-  return data
+  return hydrateRow(data)
 }
 
 export async function deleteStrategy(userId: string, id: string): Promise<void> {

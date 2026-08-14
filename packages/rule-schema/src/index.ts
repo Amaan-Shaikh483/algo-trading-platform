@@ -25,6 +25,26 @@ export type OrderType = (typeof ORDER_TYPES)[number]
 export const PRODUCT_TYPES = ['INTRADAY', 'DELIVERY', 'MARGIN', 'BTST'] as const
 export type ProductType = (typeof PRODUCT_TYPES)[number]
 
+/**
+ * Builder-facing order type (spec: Order Type section).
+ *   MIS  — Intraday          → square off same day
+ *   CNC  — Delivery          → expiry-relative entry/exit windows
+ *   BTST — Buy Today Sell Tomorrow → square off next day
+ */
+export const ORDER_TYPE_KINDS = ['MIS', 'CNC', 'BTST'] as const
+export type OrderTypeKind = (typeof ORDER_TYPE_KINDS)[number]
+
+export const TRADING_DAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI'] as const
+export type TradingDay = (typeof TRADING_DAYS)[number]
+
+/** Profit-trailing modes (spec: Risk Management → Profit Trailing). */
+export const PROFIT_TRAILING_TYPES = ['NO_TRAILING', 'LOCK_FIX_PROFIT', 'TRAIL_PROFIT', 'LOCK_AND_TRAIL'] as const
+export type ProfitTrailingType = (typeof PROFIT_TRAILING_TYPES)[number]
+
+/** CNC entry/exit are expressed in trading days before expiry, clamped 0…4. */
+export const CNC_DAYS_MIN = 0
+export const CNC_DAYS_MAX = 4
+
 export const OPERATORS = [
   { key: 'gt', label: '>', crosses: false },
   { key: 'gte', label: '≥', crosses: false },
@@ -290,6 +310,56 @@ export interface TradeDirection {
   side: 'long' | 'short'
 }
 
+// ── Order type configuration (spec: Order Type section) ─────────────────────
+
+/** CNC-only settings — entry/exit windows relative to the contract expiry. */
+export interface CncSettings {
+  /** Enter this many trading days BEFORE expiry (0…4). */
+  entryDaysBeforeExpiry: number
+  /** Exit this many trading days BEFORE expiry (0…4). */
+  exitDaysBeforeExpiry: number
+}
+
+export interface OrderTypeConfig {
+  type: OrderTypeKind
+  /** HH:mm IST — first minute the strategy may enter. */
+  startTime: string
+  /** HH:mm IST — same-day square off (MIS & CNC). Null for BTST. */
+  squareOffTime: string | null
+  /** HH:mm IST — next-day square off (BTST only). Null otherwise. */
+  nextDaySquareOffTime: string | null
+  /** Weekdays the strategy is allowed to trade. */
+  tradingDays: TradingDay[]
+  /** Present only when type === 'CNC'. */
+  cnc?: CncSettings
+}
+
+// ── Risk management (spec: Risk Management + Profit Trailing) ───────────────
+
+export interface ProfitTrailingConfig {
+  type: ProfitTrailingType
+  /** LOCK_FIX_PROFIT / LOCK_AND_TRAIL — arm the lock once profit reaches this INR. */
+  ifProfitReaches?: number
+  /** LOCK_FIX_PROFIT / LOCK_AND_TRAIL — floor profit at this INR once armed. */
+  lockProfitAt?: number
+  /** TRAIL_PROFIT / LOCK_AND_TRAIL — ratchet step in INR of profit gained. */
+  onEveryIncreaseOf?: number
+  /** TRAIL_PROFIT / LOCK_AND_TRAIL — INR the locked floor advances per step. */
+  trailProfitBy?: number
+}
+
+export interface RiskManagementConfig {
+  /** Book the whole strategy at this overall profit (INR). */
+  exitProfit?: number
+  /** Positive INR overall loss limit. */
+  exitLoss?: number
+  /** Max entry→exit cycles allowed per trading day. */
+  maxTradeCycle: number
+  /** HH:mm IST — no NEW trades after this time. */
+  noTradeAfter: string
+  profitTrailing: ProfitTrailingConfig
+}
+
 export interface StrategyRules {
   version: typeof RULE_SCHEMA_VERSION
   direction: TradeDirection
@@ -302,6 +372,294 @@ export interface StrategyRules {
   legs?: StrategyRuleLeg[]
   exit: ExitRules
   risk: RiskRules
+  /**
+   * Order Type block (MIS / CNC / BTST + session window + trading days).
+   * Optional on the type so strategies saved before this feature keep loading;
+   * `normalizeOrderType()` fills sensible defaults on read.
+   */
+  orderType?: OrderTypeConfig
+  /**
+   * Risk Management block (global exit profit/loss, trade cycle cap, no-trade
+   * cutoff, profit trailing). Optional for the same backward-compat reason —
+   * use `normalizeRiskManagement()` when reading.
+   */
+  riskManagement?: RiskManagementConfig
+}
+
+// ── Order type / risk management defaults + normalizers ─────────────────────
+
+export const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/
+
+export function defaultTradingDays(): TradingDay[] {
+  return [...TRADING_DAYS]
+}
+
+export function defaultCncSettings(): CncSettings {
+  return { entryDaysBeforeExpiry: 4, exitDaysBeforeExpiry: 0 }
+}
+
+export function defaultOrderType(type: OrderTypeKind = 'MIS'): OrderTypeConfig {
+  return {
+    type,
+    startTime: '09:16',
+    squareOffTime: type === 'BTST' ? null : '15:10',
+    nextDaySquareOffTime: type === 'BTST' ? '15:10' : null,
+    tradingDays: defaultTradingDays(),
+    ...(type === 'CNC' ? { cnc: defaultCncSettings() } : {}),
+  }
+}
+
+export function defaultProfitTrailing(): ProfitTrailingConfig {
+  return { type: 'NO_TRAILING' }
+}
+
+export function defaultRiskManagement(): RiskManagementConfig {
+  return { maxTradeCycle: 1, noTradeAfter: '15:10', profitTrailing: defaultProfitTrailing() }
+}
+
+/** Map the builder order type onto the broker product type the engines use. */
+export function productTypeForOrderType(type: OrderTypeKind): ProductType {
+  if (type === 'MIS') return 'INTRADAY'
+  if (type === 'CNC') return 'DELIVERY'
+  return 'BTST'
+}
+
+/** Inverse of `productTypeForOrderType` — used to hydrate pre-feature strategies. */
+export function orderTypeForProductType(product: ProductType | undefined): OrderTypeKind {
+  if (product === 'DELIVERY' || product === 'MARGIN') return 'CNC'
+  if (product === 'BTST') return 'BTST'
+  return 'MIS'
+}
+
+const finite = (v: unknown): number | undefined => {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v)
+    if (Number.isFinite(n)) return n
+  }
+  return undefined
+}
+
+const clampInt = (v: unknown, min: number, max: number, fallback: number): number => {
+  const n = finite(v)
+  if (n == null) return fallback
+  return Math.min(max, Math.max(min, Math.round(n)))
+}
+
+/**
+ * Read the Order Type block off any saved strategy — including ones written
+ * before the feature existed, where it is derived from entry.productType and
+ * exit.timeSquareOff so the builder still opens with meaningful values.
+ */
+export function normalizeOrderType(rules: Partial<StrategyRules> | undefined): OrderTypeConfig {
+  const raw = rules?.orderType
+  const fallbackType = raw?.type && (ORDER_TYPE_KINDS as readonly string[]).includes(raw.type)
+    ? raw.type
+    : orderTypeForProductType(rules?.entry?.productType)
+  const base = defaultOrderType(fallbackType)
+  if (!raw) {
+    // Legacy strategy: recover the square-off time from the exit rules.
+    const legacyTime = rules?.exit?.timeSquareOff?.time
+    if (legacyTime && HHMM_RE.test(legacyTime)) {
+      if (fallbackType === 'BTST') base.nextDaySquareOffTime = legacyTime
+      else base.squareOffTime = legacyTime
+    }
+    return base
+  }
+  const days = Array.isArray(raw.tradingDays)
+    ? (TRADING_DAYS as readonly string[]).filter((d) => raw.tradingDays.includes(d as TradingDay)) as TradingDay[]
+    : base.tradingDays
+  const startTime = typeof raw.startTime === 'string' && HHMM_RE.test(raw.startTime) ? raw.startTime : base.startTime
+  const squareOffTime =
+    fallbackType === 'BTST'
+      ? null
+      : typeof raw.squareOffTime === 'string' && HHMM_RE.test(raw.squareOffTime)
+        ? raw.squareOffTime
+        : base.squareOffTime
+  const nextDaySquareOffTime =
+    fallbackType === 'BTST'
+      ? typeof raw.nextDaySquareOffTime === 'string' && HHMM_RE.test(raw.nextDaySquareOffTime)
+        ? raw.nextDaySquareOffTime
+        : (base.nextDaySquareOffTime ?? '15:10')
+      : null
+  return {
+    type: fallbackType,
+    startTime,
+    squareOffTime,
+    nextDaySquareOffTime,
+    tradingDays: days.length > 0 ? days : defaultTradingDays(),
+    ...(fallbackType === 'CNC'
+      ? {
+          cnc: {
+            entryDaysBeforeExpiry: clampInt(raw.cnc?.entryDaysBeforeExpiry, CNC_DAYS_MIN, CNC_DAYS_MAX, 4),
+            exitDaysBeforeExpiry: clampInt(raw.cnc?.exitDaysBeforeExpiry, CNC_DAYS_MIN, CNC_DAYS_MAX, 0),
+          },
+        }
+      : {}),
+  }
+}
+
+/**
+ * Read the Risk Management block off any saved strategy, falling back to the
+ * pre-feature `exit.overallProfitAmount` / `overallLossAmount` fields.
+ */
+export function normalizeRiskManagement(rules: Partial<StrategyRules> | undefined): RiskManagementConfig {
+  const raw = rules?.riskManagement
+  const base = defaultRiskManagement()
+  const legacyProfit = finite(rules?.exit?.overallProfitAmount)
+  const legacyLoss = finite(rules?.exit?.overallLossAmount)
+  if (!raw) {
+    return {
+      ...base,
+      ...(legacyProfit != null && legacyProfit > 0 ? { exitProfit: legacyProfit } : {}),
+      ...(legacyLoss != null && legacyLoss > 0 ? { exitLoss: Math.abs(legacyLoss) } : {}),
+      ...(rules?.exit?.timeSquareOff?.time && HHMM_RE.test(rules.exit.timeSquareOff.time)
+        ? { noTradeAfter: rules.exit.timeSquareOff.time }
+        : {}),
+    }
+  }
+  const trailingType =
+    raw.profitTrailing?.type && (PROFIT_TRAILING_TYPES as readonly string[]).includes(raw.profitTrailing.type)
+      ? raw.profitTrailing.type
+      : 'NO_TRAILING'
+  const t = raw.profitTrailing ?? {}
+  const needsLock = trailingType === 'LOCK_FIX_PROFIT' || trailingType === 'LOCK_AND_TRAIL'
+  const needsTrail = trailingType === 'TRAIL_PROFIT' || trailingType === 'LOCK_AND_TRAIL'
+  const exitProfit = finite(raw.exitProfit) ?? legacyProfit
+  const exitLoss = finite(raw.exitLoss) ?? legacyLoss
+  return {
+    ...(exitProfit != null && exitProfit > 0 ? { exitProfit } : {}),
+    ...(exitLoss != null && exitLoss !== 0 ? { exitLoss: Math.abs(exitLoss) } : {}),
+    maxTradeCycle: clampInt(raw.maxTradeCycle, 1, 1000, base.maxTradeCycle),
+    noTradeAfter:
+      typeof raw.noTradeAfter === 'string' && HHMM_RE.test(raw.noTradeAfter) ? raw.noTradeAfter : base.noTradeAfter,
+    profitTrailing: {
+      type: trailingType,
+      ...(needsLock && finite(t.ifProfitReaches) != null ? { ifProfitReaches: finite(t.ifProfitReaches)! } : {}),
+      ...(needsLock && finite(t.lockProfitAt) != null ? { lockProfitAt: finite(t.lockProfitAt)! } : {}),
+      ...(needsTrail && finite(t.onEveryIncreaseOf) != null ? { onEveryIncreaseOf: finite(t.onEveryIncreaseOf)! } : {}),
+      ...(needsTrail && finite(t.trailProfitBy) != null ? { trailProfitBy: finite(t.trailProfitBy)! } : {}),
+    },
+  }
+}
+
+/** Which trailing fields a given mode requires — shared by FE + BE validation. */
+export function requiredTrailingFields(type: ProfitTrailingType): (keyof ProfitTrailingConfig)[] {
+  switch (type) {
+    case 'LOCK_FIX_PROFIT':
+      return ['ifProfitReaches', 'lockProfitAt']
+    case 'TRAIL_PROFIT':
+      return ['onEveryIncreaseOf', 'trailProfitBy']
+    case 'LOCK_AND_TRAIL':
+      return ['ifProfitReaches', 'lockProfitAt', 'onEveryIncreaseOf', 'trailProfitBy']
+    default:
+      return []
+  }
+}
+
+export const TRAILING_FIELD_LABELS: Record<string, string> = {
+  ifProfitReaches: 'If profit reaches',
+  lockProfitAt: 'Lock profit at',
+  onEveryIncreaseOf: 'On every increase of',
+  trailProfitBy: 'Trail profit by',
+}
+
+/**
+ * Validate the Order Type block. Shared verbatim by the builder (live form
+ * feedback) and `validateStrategyRules` (server-side enforcement), so the two
+ * can never drift.
+ */
+export function validateOrderTypeConfig(cfg: OrderTypeConfig | undefined): string[] {
+  const errors: string[] = []
+  if (cfg == null) return errors // absent block = legacy strategy, defaults apply
+  if (!(ORDER_TYPE_KINDS as readonly string[]).includes(cfg.type)) {
+    errors.push(`orderType.type must be one of ${ORDER_TYPE_KINDS.join('/')}`)
+    return errors
+  }
+  if (!HHMM_RE.test(cfg.startTime ?? '')) errors.push('orderType.startTime must be a valid HH:mm time')
+
+  if (cfg.type === 'BTST') {
+    if (!HHMM_RE.test(cfg.nextDaySquareOffTime ?? '')) {
+      errors.push('orderType.nextDaySquareOffTime must be a valid HH:mm time for BTST orders')
+    }
+  } else {
+    if (!HHMM_RE.test(cfg.squareOffTime ?? '')) {
+      errors.push('orderType.squareOffTime must be a valid HH:mm time')
+    } else if (HHMM_RE.test(cfg.startTime ?? '') && cfg.startTime >= (cfg.squareOffTime ?? '')) {
+      errors.push('orderType.startTime must be before orderType.squareOffTime')
+    }
+  }
+
+  if (!Array.isArray(cfg.tradingDays) || cfg.tradingDays.length === 0) {
+    errors.push('orderType.tradingDays must contain at least one trading day')
+  } else {
+    const invalid = cfg.tradingDays.filter((d) => !(TRADING_DAYS as readonly string[]).includes(d))
+    if (invalid.length > 0) errors.push(`orderType.tradingDays contains unsupported day(s): ${invalid.join(', ')}`)
+    if (new Set(cfg.tradingDays).size !== cfg.tradingDays.length) errors.push('orderType.tradingDays contains duplicates')
+  }
+
+  if (cfg.type === 'CNC') {
+    const cnc = cfg.cnc
+    if (cnc == null) {
+      errors.push('orderType.cnc settings are required when CNC is selected')
+    } else {
+      for (const key of ['entryDaysBeforeExpiry', 'exitDaysBeforeExpiry'] as const) {
+        const v = finite(cnc[key])
+        if (v == null || !Number.isInteger(v) || v < CNC_DAYS_MIN || v > CNC_DAYS_MAX) {
+          errors.push(`orderType.cnc.${key} must be an integer between ${CNC_DAYS_MIN} and ${CNC_DAYS_MAX}`)
+        }
+      }
+    }
+  } else if (cfg.cnc != null) {
+    errors.push('orderType.cnc settings are only allowed when CNC is selected')
+  }
+
+  return errors
+}
+
+/** Validate the Risk Management block (shared FE + BE). */
+export function validateRiskManagementConfig(cfg: RiskManagementConfig | undefined): string[] {
+  const errors: string[] = []
+  if (cfg == null) return errors // absent block = legacy strategy, defaults apply
+
+  const profit = finite(cfg.exitProfit)
+  if (cfg.exitProfit != null && cfg.exitProfit !== ('' as unknown) && !(profit != null && profit > 0)) {
+    errors.push('riskManagement.exitProfit must be a positive INR amount')
+  }
+  const loss = finite(cfg.exitLoss)
+  if (cfg.exitLoss != null && cfg.exitLoss !== ('' as unknown) && !(loss != null && loss !== 0)) {
+    errors.push('riskManagement.exitLoss must be a valid INR amount')
+  }
+
+  const cycles = finite(cfg.maxTradeCycle)
+  if (cycles == null || !Number.isInteger(cycles) || cycles < 1) {
+    errors.push('riskManagement.maxTradeCycle must be a positive integer')
+  }
+
+  if (!HHMM_RE.test(cfg.noTradeAfter ?? '')) {
+    errors.push('riskManagement.noTradeAfter must be a valid HH:mm time')
+  }
+
+  const trailing = cfg.profitTrailing
+  if (trailing == null || !(PROFIT_TRAILING_TYPES as readonly string[]).includes(trailing.type)) {
+    errors.push(`riskManagement.profitTrailing.type must be one of ${PROFIT_TRAILING_TYPES.join('/')}`)
+    return errors
+  }
+  // Trailing fields are required ONLY for the selected mode.
+  for (const field of requiredTrailingFields(trailing.type)) {
+    const v = finite(trailing[field])
+    if (v == null || v <= 0) {
+      errors.push(`riskManagement.profitTrailing.${field} (${TRAILING_FIELD_LABELS[field]}) must be a positive INR amount`)
+    }
+  }
+  if (trailing.type === 'LOCK_FIX_PROFIT' || trailing.type === 'LOCK_AND_TRAIL') {
+    const reach = finite(trailing.ifProfitReaches)
+    const lock = finite(trailing.lockProfitAt)
+    if (reach != null && lock != null && lock > reach) {
+      errors.push('riskManagement.profitTrailing.lockProfitAt cannot exceed ifProfitReaches')
+    }
+  }
+  return errors
 }
 
 // ── Defaults for the builder ─────────────────────────────────────────────────
@@ -319,6 +677,8 @@ export function defaultRules(): StrategyRules {
       timeSquareOff: { time: '15:20' },
     },
     risk: { quantity: 1, maxConcurrentPositions: 1, maxTradesPerDay: 5 },
+    orderType: defaultOrderType('MIS'),
+    riskManagement: defaultRiskManagement(),
   }
 }
 
@@ -531,6 +891,11 @@ export function validateStrategyRules(rules: unknown): { valid: boolean; errors:
     errors.push('risk.capitalAllocationPercent must be between 0 and 100')
   }
 
+  // Order Type + Risk Management blocks. Both are optional so strategies saved
+  // before the feature shipped keep validating; when present they must be sound.
+  errors.push(...validateOrderTypeConfig(r.orderType))
+  errors.push(...validateRiskManagementConfig(r.riskManagement))
+
   return { valid: errors.length === 0, errors }
 }
 
@@ -585,6 +950,30 @@ export function summarizeRules(r: StrategyRules): string[] {
   if (ex.timeSquareOff) lines.push(`Time square-off: ${ex.timeSquareOff.time} IST`)
   if (ex.maxHoldingBars) lines.push(`Max holding: ${ex.maxHoldingBars} candles`)
   lines.push(`Qty: ${r.risk.quantity} · Max positions: ${r.risk.maxConcurrentPositions} · Max trades/day: ${r.risk.maxTradesPerDay}${r.risk.capitalAllocationPercent ? ` · Capital: ${r.risk.capitalAllocationPercent}%` : ''}`)
+  const ot = r.orderType
+  if (ot) {
+    const window = ot.type === 'BTST' ? `next-day square off ${ot.nextDaySquareOffTime}` : `square off ${ot.squareOffTime}`
+    lines.push(`Order type: ${ot.type} · start ${ot.startTime} · ${window} · ${ot.tradingDays.join(', ')}`)
+    if (ot.type === 'CNC' && ot.cnc) {
+      lines.push(`CNC window: entry ${ot.cnc.entryDaysBeforeExpiry} / exit ${ot.cnc.exitDaysBeforeExpiry} trading days before expiry`)
+    }
+  }
+  const rm = r.riskManagement
+  if (rm) {
+    const parts: string[] = []
+    if (rm.exitProfit != null) parts.push(`exit profit ₹${rm.exitProfit}`)
+    if (rm.exitLoss != null) parts.push(`exit loss ₹${rm.exitLoss}`)
+    parts.push(`max ${rm.maxTradeCycle} cycle(s)`)
+    parts.push(`no trade after ${rm.noTradeAfter}`)
+    lines.push(`Risk management: ${parts.join(' · ')}`)
+    const t = rm.profitTrailing
+    if (t && t.type !== 'NO_TRAILING') {
+      const detail = requiredTrailingFields(t.type)
+        .map((f) => `${TRAILING_FIELD_LABELS[f]} ₹${t[f] ?? '—'}`)
+        .join(' · ')
+      lines.push(`Profit trailing: ${t.type.replace(/_/g, ' ').toLowerCase()} — ${detail}`)
+    }
+  }
   ;(r.legs ?? []).forEach((leg) => {
     const action = `${leg.position === 'BUY' ? 'BUY' : 'SELL'} ${leg.optionType === 'CALL' ? 'CE' : 'PE'} @ ${leg.strikeType}`
     lines.push(`Leg ${leg.legNumber} (${leg.condition})${leg.entryTime ? ` at ${leg.entryTime}` : ''}: ${action} qty ${leg.qty}${leg.active ? '' : ' (inactive)'}`)
