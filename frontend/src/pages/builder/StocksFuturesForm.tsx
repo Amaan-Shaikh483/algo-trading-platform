@@ -14,7 +14,7 @@ import {
   PROFIT_TRAILING_OPTIONS,
   newCondition,
 } from './builderState'
-import type { BuilderState, OrderTypeNew, TransactionType, ChartType, ProfitTrailing } from './builderState'
+import type { BuilderState, OrderTypeNew, TransactionType, ChartType, ProfitTrailing, Underlying } from './builderState'
 
 function Field({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) {
   return (
@@ -34,6 +34,76 @@ function SectionCard({ title, children }: { title: string; children: React.React
       <h3 className="mb-4 text-sm font-semibold uppercase tracking-wide text-gray-500">{title}</h3>
       {children}
     </div>
+  )
+}
+
+// ── Underlying Selection Section ─────────────────────────────────────────────
+
+function UnderlyingSection({
+  underlying,
+  instrument,
+  onTypeChange,
+  onInstrumentChange,
+}: {
+  underlying: Underlying
+  instrument: BuilderState['underlyingInstrument']
+  onTypeChange: (v: Underlying) => void
+  onInstrumentChange: (v: BuilderState['underlyingInstrument']) => void
+}) {
+  return (
+    <SectionCard title="Underlying Selection">
+      <div className="space-y-4">
+        <Field label="Underlying" required>
+          <div className="flex gap-2">
+            {(['Spot', 'Future'] as Underlying[]).map((u) => (
+              <button
+                key={u}
+                type="button"
+                onClick={() => onTypeChange(u)}
+                className={`rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors ${
+                  underlying === u ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                }`}
+              >
+                {u}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1.5 text-xs text-gray-400">Used for strike price calculations</p>
+        </Field>
+
+        <Field label="Underlying Instrument" required>
+          {instrument ? (
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-gray-900">
+                    {instrument.name || instrument.symbol}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {instrument.exchange}
+                    {instrument.lotsize != null && instrument.lotsize > 1
+                      ? ` · Lot Size: ${instrument.lotsize}`
+                      : ''}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onInstrumentChange(null)}
+                  className="rounded-lg px-3 py-1.5 text-xs font-medium text-brand-600 hover:bg-brand-50"
+                >
+                  Change
+                </button>
+              </div>
+            </div>
+          ) : (
+            <InstrumentSearch
+              placeholder="Search underlying (e.g. SBIN, NIFTY, RELIANCE)..."
+              onSelect={(hit) => onInstrumentChange(hit)}
+            />
+          )}
+        </Field>
+      </div>
+    </SectionCard>
   )
 }
 
@@ -569,6 +639,13 @@ export default function StocksFuturesForm({ state, patch }: Props) {
 
   return (
     <div className="space-y-5">
+      <UnderlyingSection
+        underlying={state.underlying}
+        instrument={state.underlyingInstrument}
+        onTypeChange={(underlying) => patch({ underlying })}
+        onInstrumentChange={(underlyingInstrument) => patch({ underlyingInstrument })}
+      />
+
       <InstrumentsSection instruments={state.instruments} onChange={(instruments) => patch({ instruments })} />
 
       <OrderTypeSection value={state.sfOrderType} onChange={(sfOrderType) => patch({ sfOrderType })} />

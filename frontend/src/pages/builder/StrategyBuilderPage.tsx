@@ -101,7 +101,13 @@ export default function StrategyBuilderPage() {
   }, [validationErrors, rulesValidation])
 
   const handleTypeChange = (type: StrategyType) => {
-    patch({ strategyType: type })
+    // Clear instrument selections when switching strategy types so stale
+    // data from the previous type never bleeds into the new one.
+    patch({
+      strategyType: type,
+      underlyingInstrument: null,
+      instruments: [],
+    })
   }
 
   const save = async () => {
@@ -121,6 +127,7 @@ export default function StrategyBuilderPage() {
         symbolToken: primaryInstrument?.token ?? '',
         exchange: primaryInstrument?.exchange ?? '',
         segment: state.strategyType === 'option-indicator' || state.strategyType === 'option-time' ? 'options' as const : state.segment,
+        strategyType: state.strategyType,
         timeframe: state.interval || state.timeframe,
         rules,
       }

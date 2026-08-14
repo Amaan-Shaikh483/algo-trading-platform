@@ -11,13 +11,9 @@ import type { InstrumentRow } from '../supabase/types'
  *   https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json
  */
 
-const SCRIP_MASTER_URL =
-  process.env.SCRIP_MASTER_URL ?? 'https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json'
-
-/** exch_seg values to cache (env-tunable; NSE keeps the table lean by default). */
-const DEFAULT_EXCH_SEGMENTS = (process.env.INSTRUMENT_SYNC_EXCH_SEG ?? 'NSE,BSE,NFO').split(',').map((s) => s.trim())
-
-const UPSERT_BATCH = 1000
+// DEPRECATED: Angel Broking scrip master URL and sync configuration removed.
+// The instruments table is now manually seeded with 4 option indices only.
+// Environment variables SCRIP_MASTER_URL and INSTRUMENT_SYNC_EXCH_SEG are no longer used.
 
 export interface InstrumentHit {
   token: string
@@ -138,57 +134,25 @@ export interface InstrumentSyncSummary {
 }
 
 /**
- * Downloads the scrip master and upserts it into `instruments` in batches.
- * The file is large (100K–1M+ records); filter via INSTRUMENT_SYNC_EXCH_SEG.
- * `maxRecords` exists for smoke-testing without a full load.
+ * DEPRECATED: Angel Broking scrip master sync removed.
+ * 
+ * The instruments table is now manually seeded with only 4 indices required
+ * for option trading: NIFTY 50, NIFTY BANK, NIFTY FIN SERVICE, SENSEX.
+ * 
+ * This function is kept for backwards compatibility but returns an empty summary.
+ * Use the migration script to populate: supabase/migrations/00006_seed_option_indices.sql
  */
 export async function syncInstruments(opts: { maxRecords?: number; dryRun?: boolean } = {}): Promise<InstrumentSyncSummary> {
-  const started = Date.now()
-  logger.info('instrument sync starting', { url: SCRIP_MASTER_URL, exchanges: DEFAULT_EXCH_SEGMENTS })
-
-  const response = await fetch(SCRIP_MASTER_URL)
-  if (!response.ok) throw new HttpError(502, `Scrip master download failed (HTTP ${response.status})`, 'SCRIP_FETCH')
-  // NOTE: scrip master can be >80MB; JSON.parse of the whole body is a known
-  // trade-off — move to a streaming parser if server memory becomes a concern.
-  const records = (await response.json()) as ScripRecord[]
-  if (!Array.isArray(records)) throw new HttpError(502, 'Scrip master payload was not a JSON array', 'SCRIP_FETCH')
-
-  const allow = new Set(DEFAULT_EXCH_SEGMENTS)
-  const seen = new Set<string>()
-  const rows: Omit<InstrumentRow, 'id' | 'updated_at'>[] = []
-  for (const rec of records) {
-    if (!rec.exch_seg || !allow.has(rec.exch_seg)) continue
-    const mapped = mapScripRecord(rec)
-    if (!mapped) continue
-    const key = `${mapped.exchange}:${mapped.token}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    rows.push(mapped)
-    if (opts.maxRecords && rows.length >= opts.maxRecords) break
-  }
-
-  let upserted = 0
-  if (!opts.dryRun) {
-    const supabase = getServiceClient()
-    for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
-      const batch = rows.slice(i, i + UPSERT_BATCH)
-      const { error } = await supabase
-        .from('instruments')
-        .upsert(batch as never, { onConflict: 'exchange,token', ignoreDuplicates: false })
-      if (error) throw new HttpError(500, `Instrument upsert failed at batch ${i / UPSERT_BATCH}: ${error.message}`)
-      upserted += batch.length
-      if (upserted % 10000 < UPSERT_BATCH) logger.info('instrument sync progress', { upserted, total: rows.length })
-    }
-  }
-
+  logger.warn('syncInstruments called but is deprecated - Angel Broking scrip master sync disabled')
+  
   const summary: InstrumentSyncSummary = {
-    fetched: records.length,
-    mapped: rows.length,
-    upserted,
-    exchangesIncluded: DEFAULT_EXCH_SEGMENTS,
-    durationMs: Date.now() - started,
+    fetched: 0,
+    mapped: 0,
+    upserted: 0,
+    exchangesIncluded: [],
+    durationMs: 0,
     dryRun: opts.dryRun === true,
   }
-  logger.info('instrument sync completed', { ...summary })
+  
   return summary
 }

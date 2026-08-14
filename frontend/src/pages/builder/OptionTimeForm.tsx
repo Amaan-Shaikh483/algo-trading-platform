@@ -1,6 +1,5 @@
 import { Plus } from 'lucide-react'
 import { TextInput } from '../../components/ui'
-import InstrumentSearch from '../../components/InstrumentSearch'
 import OperandEditor from '../../components/OperandEditor'
 import { OPERATORS } from '@algo/rule-schema'
 import type { Operator } from '@algo/rule-schema'
@@ -12,6 +11,33 @@ import {
   newOptionLeg,
 } from './builderState'
 import type { BuilderState, Underlying } from './builderState'
+
+// ── Predefined Instruments for Option Trading ───────────────────────────────
+
+interface PredefinedInstrument {
+  symbol: string
+  name: string
+  exchange: string
+  lotSize: number
+  token: string
+}
+
+const PREDEFINED_INSTRUMENTS: PredefinedInstrument[] = [
+  { symbol: 'NIFTY 50', name: 'Nifty 50', exchange: 'NSE', lotSize: 65, token: '99926000' },
+  { symbol: 'NIFTY BANK', name: 'Nifty Bank', exchange: 'NSE', lotSize: 30, token: '99926009' },
+  { symbol: 'NIFTY FIN SERVICE', name: 'Nifty Fin Service', exchange: 'NSE', lotSize: 60, token: '99926037' },
+  { symbol: 'SENSEX', name: 'Sensex', exchange: 'BSE', lotSize: 20, token: '99919000' },
+]
+
+/** Get lot size with fallback for common indices */
+function getLotSize(instrument: BuilderState['underlyingInstrument']): number {
+  // First check if it's one of our predefined instruments
+  const predefined = PREDEFINED_INSTRUMENTS.find(i => i.symbol === instrument?.symbol)
+  if (predefined) return predefined.lotSize
+  
+  // Otherwise use database lot size or default to 1
+  return instrument?.lotsize ?? 1
+}
 
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -39,9 +65,11 @@ function Field({ label, required, children }: { label: string; required?: boolea
 function StrategyLegsSection({
   legs,
   onChange,
+  underlyingInstrument,
 }: {
   legs: BuilderState['legs']
   onChange: (legs: BuilderState['legs']) => void
+  underlyingInstrument: BuilderState['underlyingInstrument']
 }) {
   const updateLeg = (id: string, partial: Partial<BuilderState['legs'][0]>) => {
     onChange(legs.map((l) => (l.id === id ? { ...l, ...partial } : l)))
@@ -74,6 +102,7 @@ function StrategyLegsSection({
             onRemove={() => removeLeg(leg.id)}
             canRemove={legs.length > 1}
             showEntryTime
+            lotSize={getLotSize(underlyingInstrument)}
           />
         ))}
         <button
@@ -98,6 +127,14 @@ interface Props {
 export default function OptionTimeForm({ state, patch }: Props) {
   const handleRiskFieldChange = (field: string, value: string) => {
     patch({ [field]: value } as Partial<BuilderState>)
+  }
+
+  // Auto-update all leg quantities when underlying instrument changes
+  const handleInstrumentChange = (instrument: BuilderState['underlyingInstrument']) => {
+    const lotSize = getLotSize(instrument)
+    // Update all legs to use the new lot size
+    const updatedLegs = state.legs.map(leg => ({ ...leg, qty: lotSize }))
+    patch({ underlyingInstrument: instrument, legs: updatedLegs })
   }
 
   return (
@@ -128,29 +165,61 @@ export default function OptionTimeForm({ state, patch }: Props) {
               </button>
             ))}
           </div>
-          <p className="mt-1.5 text-xs text-gray-400">Used for strike price calculations</p>
+          <p className="mt-1.5 text-xs text-gray-400">Choose the reference used for calculations</p>
         </Field>
 
         <Field label="Underlying Instrument" required>
           {state.underlyingInstrument ? (
-            <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5">
-              <span className="text-sm font-medium text-gray-900">
-                {state.underlyingInstrument.symbol}{' '}
-                <span className="ml-2 text-xs text-gray-400">{state.underlyingInstrument.exchange}</span>
-              </span>
-              <button
-                type="button"
-                onClick={() => patch({ underlyingInstrument: null })}
-                className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-              >
-                Change
-              </button>
+            <div className="space-y-3">
+              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">
+                      {state.underlyingInstrument.name || state.underlyingInstrument.symbol}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {state.underlyingInstrument.exchange} · Lot Size: {getLotSize(state.underlyingInstrument)}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => patch({ underlyingInstrument: null })}
+                    className="rounded-lg px-3 py-1.5 text-xs font-medium text-brand-600 hover:bg-brand-50"
+                  >
+                    Change
+                  </button>
+                </div>
+              </div>
             </div>
           ) : (
-            <InstrumentSearch
-              placeholder="Search underlying (e.g. SBIN, NIFTY, RELIANCE)…"
-              onSelect={(hit) => patch({ underlyingInstrument: hit })}
-            />
+            <div className="space-y-2">
+              <p className="text-xs text-gray-500">Select one of the following instruments:</p>
+              <div className="grid grid-cols-2 gap-2">
+                {PREDEFINED_INSTRUMENTS.map((inst) => (
+                  <button
+                    key={inst.symbol}
+                    type="button"
+                    onClick={() => handleInstrumentChange({
+                      token: inst.token,
+                      symbol: inst.symbol,
+                      name: inst.name,
+                      exchange: inst.exchange,
+                      segment: 'equity',
+                      lotsize: inst.lotSize,
+                      tick_size: null,
+                      expiry: null,
+                      strike: null,
+                    })}
+                    className="rounded-xl border-2 border-gray-200 bg-white p-3 text-left transition-colors hover:border-brand-300 hover:bg-brand-50"
+                  >
+                    <p className="text-sm font-semibold text-gray-900">{inst.name}</p>
+                    <p className="mt-0.5 text-xs text-gray-500">
+                      {inst.exchange} · Lot: {inst.lotSize}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </Field>
       </SectionCard>
@@ -201,7 +270,7 @@ export default function OptionTimeForm({ state, patch }: Props) {
       </SectionCard>
 
       {/* Strategy Legs (time-triggered) */}
-      <StrategyLegsSection legs={state.legs} onChange={(legs) => patch({ legs })} />
+      <StrategyLegsSection legs={state.legs} onChange={(legs) => patch({ legs })} underlyingInstrument={state.underlyingInstrument} />
 
       {/* Exit Conditions */}
       <SectionCard title="Exit Conditions">

@@ -31,15 +31,22 @@ internalRouter.post('/jobs/token-refresh', (_req, res, next) => {
 })
 
 /**
- * Spec 3.3: daily scrip-master → instruments table sync.
- * Query opts (for ops): ?maxRecords=500 (smoke test) · ?dryRun=1 (validate + count only).
+ * DEPRECATED: Scrip-master sync endpoint disabled.
+ * 
+ * The instruments table is now manually seeded with 4 option indices only.
+ * This endpoint is kept for backwards compatibility but returns a deprecated message.
  */
-internalRouter.post('/jobs/instrument-sync', (req, res, next) => {
-  const maxRecords = typeof req.query.maxRecords === 'string' ? parseInt(req.query.maxRecords, 10) : undefined
-  const dryRun = req.query.dryRun === '1'
-  syncInstruments({ maxRecords: Number.isFinite(maxRecords) ? maxRecords : undefined, dryRun })
-    .then((summary) => res.json(summary))
-    .catch(next)
+internalRouter.post('/jobs/instrument-sync', (_req, res) => {
+  res.json({
+    deprecated: true,
+    message: 'Angel Broking scrip master sync has been disabled. Instruments table is manually seeded with 4 option indices.',
+    fetched: 0,
+    mapped: 0,
+    upserted: 0,
+    exchangesIncluded: [],
+    durationMs: 0,
+    dryRun: false,
+  })
 })
 
 /**
