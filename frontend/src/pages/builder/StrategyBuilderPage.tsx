@@ -131,9 +131,10 @@ export default function StrategyBuilderPage() {
         strategyType: state.strategyType,
         timeframe: state.interval || state.timeframe,
         rules,
-        // Also sent at the payload root per the documented API shape; the
-        // backend folds them into `rules` (the engines' source of truth).
-        orderType: toOrderTypeConfig(state),
+        // The dynamic block is exclusive to Indicator Based (and the existing
+        // Stocks/Futures builder). Time Based intentionally keeps its legacy
+        // product-type + timing shape.
+        ...(state.strategyType !== 'option-time' ? { orderType: toOrderTypeConfig(state) } : {}),
         riskManagement: toRiskManagementConfig(state),
       }
       const saved = state.id

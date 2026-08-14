@@ -360,8 +360,15 @@ export interface RiskManagementConfig {
   profitTrailing: ProfitTrailingConfig
 }
 
+export interface TradeConfiguration {
+  transactionType: 'Both Side' | 'Only Long' | 'Only Short'
+  chartType: 'Candle' | 'Heikin Ashi'
+}
+
 export interface StrategyRules {
   version: typeof RULE_SCHEMA_VERSION
+  /** Builder discriminator used to keep Indicator and Time Based persistence separate. */
+  strategyType?: 'stocks-futures' | 'option-indicator' | 'option-time'
   direction: TradeDirection
   entry: { orderType: OrderType; productType: ProductType }
   entryConditions: ConditionGroup
@@ -370,6 +377,8 @@ export interface StrategyRules {
   shortEntryConditions?: ConditionGroup
   /** Option strategy legs (option-indicator & option-time). */
   legs?: StrategyRuleLeg[]
+  /** Indicator-builder controls persisted in rules; interval remains the strategy timeframe. */
+  tradeConfiguration?: TradeConfiguration
   exit: ExitRules
   risk: RiskRules
   /**
@@ -895,6 +904,15 @@ export function validateStrategyRules(rules: unknown): { valid: boolean; errors:
   // before the feature shipped keep validating; when present they must be sound.
   errors.push(...validateOrderTypeConfig(r.orderType))
   errors.push(...validateRiskManagementConfig(r.riskManagement))
+
+  if (r.tradeConfiguration != null) {
+    if (!['Both Side', 'Only Long', 'Only Short'].includes(r.tradeConfiguration.transactionType)) {
+      errors.push('tradeConfiguration.transactionType is invalid')
+    }
+    if (!['Candle', 'Heikin Ashi'].includes(r.tradeConfiguration.chartType)) {
+      errors.push('tradeConfiguration.chartType is invalid')
+    }
+  }
 
   return { valid: errors.length === 0, errors }
 }

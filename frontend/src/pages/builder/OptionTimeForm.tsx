@@ -4,9 +4,8 @@ import OperandEditor from '../../components/OperandEditor'
 import { OPERATORS } from '@algo/rule-schema'
 import type { Operator } from '@algo/rule-schema'
 import OptionLegCard from './OptionLegCard'
-import OrderTypeSection from './OrderTypeSection'
 import RiskManagementSection from './RiskManagementSection'
-import { newCondition, newOptionLeg } from './builderState'
+import { ORDER_TYPE_OPTIONS, newCondition, newOptionLeg } from './builderState'
 import type { BuilderState, Underlying } from './builderState'
 
 // ── Predefined Instruments for Option Trading ───────────────────────────────
@@ -114,6 +113,64 @@ function StrategyLegsSection({
   )
 }
 
+// ── Existing Time-Based Order Type / Timing ─────────────────────────────────
+
+/**
+ * Intentionally retains the original time-based UI. The dynamic MIS/CNC/BTST
+ * configuration belongs only to Option Trading - Indicator Based.
+ */
+function TimeBasedOrderType({ state, patch }: Props) {
+  return (
+    <>
+      <SectionCard title="Order Type">
+        <div className="flex flex-wrap gap-3">
+          {ORDER_TYPE_OPTIONS.map((opt) => (
+            <label
+              key={opt.value}
+              className={`flex cursor-pointer items-center gap-2 rounded-xl border px-4 py-2.5 transition-colors ${
+                state.optOrderType === opt.value
+                  ? 'border-brand-300 bg-brand-50 text-brand-700'
+                  : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+              }`}
+            >
+              <input
+                type="radio"
+                name="optTimeOrderType"
+                value={opt.value}
+                checked={state.optOrderType === opt.value}
+                onChange={() => patch({ optOrderType: opt.value })}
+                className="h-4 w-4 accent-brand-600"
+              />
+              <span className="text-sm font-semibold">{opt.label}</span>
+              <span className="text-xs text-gray-400">({opt.desc})</span>
+            </label>
+          ))}
+        </div>
+      </SectionCard>
+
+      <SectionCard title="Timing">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <TextInput
+            label="Start Time"
+            type="time"
+            value={state.startTime}
+            onChange={(e) => patch({ startTime: e.target.value })}
+          />
+          <TextInput
+            label="Square Off Time"
+            type="time"
+            value={state.squareOffTime}
+            onChange={(e) => patch({ squareOffTime: e.target.value })}
+          />
+        </div>
+        {state.startTime >= state.squareOffTime && (
+          <p className="mt-2 text-xs text-red-500">Start time must be before Square Off time</p>
+        )}
+      </SectionCard>
+    </>
+  )
+}
+
 // ── Main Option Time Form ────────────────────────────────────────────────────
 
 interface Props {
@@ -217,9 +274,10 @@ export default function OptionTimeForm({ state, patch }: Props) {
         </Field>
       </SectionCard>
 
-      {/* Order Type (MIS / CNC / BTST) — start time, square off and trading
-          days live inside this section and swap with the selection. */}
-      <OrderTypeSection state={state} patch={patch} name="optTimeOrderType" field="optOrderType" />
+      {/* Time Based deliberately keeps its original, non-dynamic Order Type
+          and Timing cards. CNC expiry sliders / BTST next-day fields are not
+          rendered here. */}
+      <TimeBasedOrderType state={state} patch={patch} />
 
       {/* Strategy Legs (time-triggered) */}
       <StrategyLegsSection legs={state.legs} onChange={(legs) => patch({ legs })} underlyingInstrument={state.underlyingInstrument} />

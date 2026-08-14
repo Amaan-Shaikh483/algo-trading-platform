@@ -563,11 +563,11 @@ function groupOf(conditions: Condition[]): ConditionGroup | undefined {
 }
 
 /** Serialize a builder leg into the schema leg shape (drops UI-only id). */
-export function serializeLeg(leg: OptionLeg): StrategyRuleLeg {
+export function serializeLeg(leg: OptionLeg, includeEntryTime = true): StrategyRuleLeg {
   return {
     legNumber: leg.legNumber,
     condition: leg.condition,
-    entryTime: leg.entryTime,
+    ...(includeEntryTime ? { entryTime: leg.entryTime } : {}),
     strikeCriteria: leg.strikeCriteria,
     strikeType: leg.strikeType,
     qty: leg.qty,
@@ -623,12 +623,19 @@ export function toRules(state: BuilderState): StrategyRules {
 
   return {
     version: RULE_SCHEMA_VERSION,
+    strategyType: state.strategyType,
     direction: { side: state.direction },
     entry: { orderType: state.orderType, productType: toProductType(orderTypeNew) },
     entryConditions: { combinator: 'and', conditions: allConditions.length > 0 ? allConditions : state.entryConditions },
     longEntryConditions: groupOf(state.longEntryConditions),
     shortEntryConditions: groupOf(state.shortEntryConditions),
-    legs: optionLegs.length > 0 ? optionLegs.map(serializeLeg) : undefined,
+    legs:
+      optionLegs.length > 0
+        ? optionLegs.map((leg) => serializeLeg(leg, state.strategyType === 'option-time'))
+        : undefined,
+    ...(state.strategyType === 'option-indicator'
+      ? { tradeConfiguration: { transactionType: state.transactionType, chartType: state.chartType } }
+      : {}),
     exit: deriveExit(state),
     risk: {
       quantity: num(state.risk.quantity),
@@ -636,7 +643,10 @@ export function toRules(state: BuilderState): StrategyRules {
       maxConcurrentPositions: num(state.risk.maxPositions),
       maxTradesPerDay: num(state.risk.maxTradesPerDay),
     },
-    orderType: toOrderTypeConfig(state),
+    // Time Based keeps the pre-dynamic schema: broker product type + legacy
+    // timing fields. Only Stocks/Futures and Option Indicator persist the new
+    // Order Type block.
+    ...(state.strategyType !== 'option-time' ? { orderType: toOrderTypeConfig(state) } : {}),
     riskManagement: toRiskManagementConfig(state),
   }
 }
@@ -644,7 +654,12 @@ export function toRules(state: BuilderState): StrategyRules {
 /** Hydrate the builder from a saved strategy (edit mode). */
 export function fromStrategyRow(row: StrategyRowView): BuilderState {
   const r = row.rules
-  const optionTime = (r.legs ?? []).some((l) => Boolean(l.entryTime))
+  const optionTime =
+    r.strategyType === 'option-time' ||
+    (r.strategyType == null &&
+      (r.legs ?? []).some((l) => Boolean(l.entryTime)) &&
+      (r.longEntryConditions?.conditions.length ?? 0) === 0 &&
+      (r.shortEntryConditions?.conditions.length ?? 0) === 0)
   const restoredLoss =
     r.exit.overallLossAmount != null
       ? String(r.exit.overallLossAmount)
@@ -701,6 +716,8 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
     segment: row.segment,
     timeframe: row.timeframe as Timeframe,
     interval: row.timeframe,
+    transactionType: r.tradeConfiguration?.transactionType ?? 'Both Side',
+    chartType: r.tradeConfiguration?.chartType ?? 'Candle',
     direction: r.direction.side,
     orderType: r.entry.orderType,
     productType: r.entry.productType,
@@ -780,24 +797,33 @@ export function configErrors(state: BuilderState): string[] {
 
   if (!TIME_RE.test(state.startTime)) errors.push('Start Time must be a valid time')
 
-  if (type === 'BTST') {
-    if (!TIME_RE.test(state.nextDaySquareOffTime)) errors.push('Next Day Square Off must be a valid time')
-  } else {
+  if (state.strategyType === 'option-time') {
+    // Original Time Based form always uses the same-day Square Off field,
+    // regardless of which broker product radio is selected.
     if (!TIME_RE.test(state.squareOffTime)) errors.push('Square Off must be a valid time')
     else if (TIME_RE.test(state.startTime) && state.startTime >= state.squareOffTime) {
       errors.push('Start Time must be before Square Off')
     }
-  }
+  } else {
+    if (type === 'BTST') {
+      if (!TIME_RE.test(state.nextDaySquareOffTime)) errors.push('Next Day Square Off must be a valid time')
+    } else {
+      if (!TIME_RE.test(state.squareOffTime)) errors.push('Square Off must be a valid time')
+      else if (TIME_RE.test(state.startTime) && state.startTime >= state.squareOffTime) {
+        errors.push('Start Time must be before Square Off')
+      }
+    }
 
-  if (state.tradingDays.length === 0) errors.push('Select at least one trading day')
+    if (state.tradingDays.length === 0) errors.push('Select at least one trading day')
 
-  if (type === 'CNC') {
-    for (const [label, value] of [
-      ['Entry', state.cncEntryDaysBeforeExpiry],
-      ['Exit', state.cncExitDaysBeforeExpiry],
-    ] as const) {
-      if (!Number.isInteger(value) || value < CNC_SLIDER_MIN || value > CNC_SLIDER_MAX) {
-        errors.push(`CNC ${label} days before expiry must be between ${CNC_SLIDER_MIN} and ${CNC_SLIDER_MAX}`)
+    if (type === 'CNC') {
+      for (const [label, value] of [
+        ['Entry', state.cncEntryDaysBeforeExpiry],
+        ['Exit', state.cncExitDaysBeforeExpiry],
+      ] as const) {
+        if (!Number.isInteger(value) || value < CNC_SLIDER_MIN || value > CNC_SLIDER_MAX) {
+          errors.push(`CNC ${label} days before expiry must be between ${CNC_SLIDER_MIN} and ${CNC_SLIDER_MAX}`)
+        }
       }
     }
   }

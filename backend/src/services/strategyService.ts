@@ -86,10 +86,34 @@ function assertValidRules(rules: unknown): asserts rules is StrategyRules {
  * values. This is a pure read-time projection — nothing is written back until
  * the user saves.
  */
+function isOptionTimeRules(rules: Partial<StrategyRules>): boolean {
+  if (rules.strategyType != null) return rules.strategyType === 'option-time'
+  // Legacy fallback: old rows had no discriminator. Indicator strategies carry
+  // long/short signal groups; Time Based rows rely on per-leg entryTime only.
+  const hasIndicatorSignals =
+    (rules.longEntryConditions?.conditions.length ?? 0) > 0 ||
+    (rules.shortEntryConditions?.conditions.length ?? 0) > 0
+  return !hasIndicatorSignals && Array.isArray(rules.legs) && rules.legs.some((leg) => Boolean(leg.entryTime))
+}
+
 function hydrateRow(row: StrategyRow): StrategyRow {
   const rules = (row.rules ?? {}) as Partial<StrategyRules>
-  const orderType = normalizeOrderType(rules)
   const riskManagement = normalizeRiskManagement(rules)
+
+  // Time Based strategies retain their original product-type + timing model.
+  // Migration 00007 may have backfilled an orderType block into older rows;
+  // hide that derived block so it cannot activate the new Indicator gates.
+  if (isOptionTimeRules(rules)) {
+    const { orderType: _ignored, ...legacyRules } = rules
+    return {
+      ...row,
+      rules: { ...legacyRules, riskManagement } as never,
+      order_type: null,
+      risk_management: (row.risk_management ?? riskManagement) as never,
+    }
+  }
+
+  const orderType = normalizeOrderType(rules)
   return {
     ...row,
     rules: { ...(rules as object), orderType, riskManagement } as never,
@@ -119,8 +143,13 @@ function sanitizeRules(rules: unknown): StrategyRules {
   //     derived from their legacy fields instead of failing to load, and
   //   * the persisted blob is always canonical (times validated, CNC days
   //     clamped to 0…4, trailing fields pruned to the selected mode).
-  const orderType = normalizeOrderType(parsed)
   const riskManagement = normalizeRiskManagement(parsed)
+  if (isOptionTimeRules(parsed)) {
+    const { orderType: _ignored, ...legacyRules } = parsed
+    return { ...legacyRules, riskManagement } as StrategyRules
+  }
+
+  const orderType = normalizeOrderType(parsed)
   return {
     ...parsed,
     orderType,

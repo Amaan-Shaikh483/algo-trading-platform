@@ -410,7 +410,13 @@ export default function OptionIndicatorForm({ state, patch }: Props) {
 
       {/* Order Type (MIS / CNC / BTST) — start time, square off and trading
           days live inside this section and swap with the selection. */}
-      <OrderTypeSection state={state} patch={patch} name="optIndicatorOrderType" field="optOrderType" />
+      <OrderTypeSection
+        state={state}
+        patch={patch}
+        name="optIndicatorOrderType"
+        field="optOrderType"
+        includeTradeConfiguration
+      />
 
       <StrategyLegsSection legs={state.legs} onChange={(legs) => patch({ legs })} underlyingInstrument={state.underlyingInstrument} />
 
