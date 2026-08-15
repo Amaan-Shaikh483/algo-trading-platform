@@ -1,5 +1,5 @@
 import { indicatorInstanceId } from '@algo/rule-schema'
-import type { Condition, Operand, StrategyRules } from '@algo/rule-schema'
+import type { Condition, ConditionGroup, Operand, StrategyRules } from '@algo/rule-schema'
 import type { Candle } from '../brokers/types'
 import type { IndicatorRuntime } from './indicatorEngine'
 
@@ -62,10 +62,50 @@ export function evaluateCondition(condition: Condition, frame: EvalFrame): Condi
   }
 }
 
-/** AND/OR over the entry group (spec §3.4 step 2). */
-export function evaluateEntrySignal(rules: StrategyRules, frame: EvalFrame): boolean {
-  const { combinator, conditions } = rules.entryConditions
-  if (conditions.length === 0) return false
-  const verdicts = conditions.map((c) => evaluateCondition(c, frame).passed)
-  return combinator === 'and' ? verdicts.every(Boolean) : verdicts.some(Boolean)
+/** AND/OR over one condition group (spec §3.4 step 2). */
+export function evaluateConditionGroup(group: ConditionGroup | undefined, frame: EvalFrame): boolean {
+  if (!group || group.conditions.length === 0) return false
+  const verdicts = group.conditions.map((c) => evaluateCondition(c, frame).passed)
+  return group.combinator === 'and' ? verdicts.every(Boolean) : verdicts.some(Boolean)
+}
+
+/**
+ * Evaluate a strategy entry signal. When a direction is supplied and the rule
+ * tree contains split long/short groups, only that direction's group is used.
+ * This is critical: AND-ing a bullish crossover with its bearish inverse (as
+ * the old builder's merged compatibility group did) can never fire.
+ */
+export function evaluateEntrySignal(
+  rules: StrategyRules,
+  frame: EvalFrame,
+  direction?: 'long' | 'short',
+): boolean {
+  const hasDirectionalGroups =
+    (rules.longEntryConditions?.conditions.length ?? 0) > 0 ||
+    (rules.shortEntryConditions?.conditions.length ?? 0) > 0
+  if (direction && hasDirectionalGroups) {
+    return evaluateConditionGroup(
+      direction === 'long' ? rules.longEntryConditions : rules.shortEntryConditions,
+      frame,
+    )
+  }
+  return evaluateConditionGroup(rules.entryConditions, frame)
+}
+
+/** Return all direction-specific signals that pass on this frame. */
+export function evaluateDirectionalEntrySignals(
+  rules: StrategyRules,
+  frame: EvalFrame,
+): Array<'long' | 'short'> {
+  const hasDirectionalGroups =
+    (rules.longEntryConditions?.conditions.length ?? 0) > 0 ||
+    (rules.shortEntryConditions?.conditions.length ?? 0) > 0
+  if (!hasDirectionalGroups) {
+    return evaluateEntrySignal(rules, frame) ? [rules.direction.side] : []
+  }
+  const allowed = rules.tradeConfiguration?.transactionType ?? 'Both Side'
+  const out: Array<'long' | 'short'> = []
+  if (allowed !== 'Only Short' && evaluateEntrySignal(rules, frame, 'long')) out.push('long')
+  if (allowed !== 'Only Long' && evaluateEntrySignal(rules, frame, 'short')) out.push('short')
+  return out
 }

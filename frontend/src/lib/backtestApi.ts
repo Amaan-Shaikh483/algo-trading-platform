@@ -29,7 +29,17 @@ export interface BacktestRunSummary {
   completed_at: string | null
 }
 
-export type ExitReason = 'stop_loss' | 'trailing_stop' | 'target' | 'time_squareoff' | 'max_holding' | 'end_of_data'
+export type ExitReason =
+  | 'stop_loss'
+  | 'trailing_stop'
+  | 'target'
+  | 'time_squareoff'
+  | 'expiry_squareoff'
+  | 'max_holding'
+  | 'end_of_data'
+  | 'overall_profit'
+  | 'overall_loss'
+  | 'profit_trailing'
 
 export interface BacktestTrade {
   side: 'LONG' | 'SHORT'
@@ -41,6 +51,14 @@ export interface BacktestTrade {
   grossPnl: number
   fees: number
   netPnl: number
+  optionContract?: {
+    strike: number
+    optionType: 'CE' | 'PE'
+    expiry: string
+    deltaAtEntry: number
+    impliedVol: number
+    source: 'market' | 'synthetic'
+  }
   exitReason: ExitReason
   barsHeld: number
 }
@@ -71,6 +89,8 @@ export interface BacktestStats {
 
 export interface BacktestResult {
   summary: BacktestStats
+  optionDataMode?: 'not_applicable' | 'market' | 'synthetic' | 'underlying_proxy'
+  assumptions?: string[]
   equityCurve: { t: string; equity: number; cash: number }[]
   drawdownCurve: { t: string; drawdown: number }[]
   trades: BacktestTrade[]

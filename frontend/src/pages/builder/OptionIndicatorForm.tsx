@@ -383,6 +383,68 @@ function ExitConditionsSection({
   )
 }
 
+// ── Option pricing / Greeks controls ─────────────────────────────────────────
+
+function OptionModelSection({ state, patch }: { state: BuilderState; patch: (p: Partial<BuilderState>) => void }) {
+  const inputCls =
+    'w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm focus:border-brand-400 focus:bg-white focus:outline-none'
+  return (
+    <SectionCard title="Option Pricing & Greeks">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Field label="Minimum |Delta|">
+          <input
+            className={inputCls}
+            type="number"
+            min={0}
+            max={1}
+            step={0.05}
+            value={state.optionMinAbsDelta}
+            onChange={(e) => patch({ optionMinAbsDelta: e.target.value })}
+          />
+        </Field>
+        <Field label="Expiry buffer (minutes)">
+          <input
+            className={inputCls}
+            type="number"
+            min={0}
+            max={1440}
+            step={1}
+            value={state.optionExpiryBufferMinutes}
+            onChange={(e) => patch({ optionExpiryBufferMinutes: e.target.value })}
+          />
+        </Field>
+        <Field label="Risk-free rate (%)">
+          <input
+            className={inputCls}
+            type="number"
+            min={-100}
+            max={100}
+            step={0.1}
+            value={state.optionRiskFreeRatePercent}
+            onChange={(e) => patch({ optionRiskFreeRatePercent: e.target.value })}
+          />
+        </Field>
+        <Field label="Backtest IV (%)">
+          <input
+            className={inputCls}
+            type="number"
+            min={0.01}
+            max={500}
+            step={0.5}
+            value={state.optionImpliedVolatilityPercent}
+            onChange={(e) => patch({ optionImpliedVolatilityPercent: e.target.value })}
+          />
+        </Field>
+      </div>
+      <p className="mt-3 text-xs leading-relaxed text-gray-400">
+        Delta filters option entries by absolute value. The expiry buffer closes positions and blocks new entries near
+        expiry. IV and the risk-free rate are used only when expired historical option premiums are unavailable and the
+        backtest must use a clearly labelled Black–Scholes synthetic series.
+      </p>
+    </SectionCard>
+  )
+}
+
 // ── Main Option Indicator Form ───────────────────────────────────────────────
 
 interface Props {
@@ -419,6 +481,8 @@ export default function OptionIndicatorForm({ state, patch }: Props) {
       />
 
       <StrategyLegsSection legs={state.legs} onChange={(legs) => patch({ legs })} underlyingInstrument={state.underlyingInstrument} />
+
+      <OptionModelSection state={state} patch={patch} />
 
       <EntryConditionsSection
         longConditions={state.longEntryConditions}

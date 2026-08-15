@@ -1,8 +1,13 @@
 import type { StrategyRuleLeg, StrategyRules } from '@algo/rule-schema'
-import { indicatorInstanceId } from '@algo/rule-schema'
-import type { Candle } from '../brokers/types'
+import { indicatorInstanceId, normalizeOptionExecution } from '@algo/rule-schema'
+import type { Candle, OptionChainData } from '../brokers/types'
 import { IndicatorRuntime, collectIndicatorSpecs, hhmmToMinutes, istDayKey, istMinutesOfDay } from './indicatorEngine'
-import { evaluateEntrySignal } from './ruleEvaluator'
+import { evaluateDirectionalEntrySignals, evaluateEntrySignal } from './ruleEvaluator'
+import {
+  optionDataCandle,
+  selectOptionContract,
+  synthesizeOptionContract,
+} from './optionMarketData'
 import { hasTimeTriggeredLegs, legSide, markLegFired, pickScheduledLeg } from './timeTriggers'
 import {
   ProfitTrailer,
@@ -60,11 +65,21 @@ export interface BacktestTrade {
   grossPnl: number
   fees: number
   netPnl: number
+  /** Present when the trade used option-premium data. */
+  optionContract?: {
+    strike: number
+    optionType: 'CE' | 'PE'
+    expiry: string
+    deltaAtEntry: number
+    impliedVol: number
+    source: 'market' | 'synthetic'
+  }
   exitReason:
     | 'stop_loss'
     | 'trailing_stop'
     | 'target'
     | 'time_squareoff'
+    | 'expiry_squareoff'
     | 'max_holding'
     | 'end_of_data'
     | 'overall_profit'
@@ -105,6 +120,9 @@ export interface BacktestSummary {
 
 export interface BacktestResult {
   summary: BacktestSummary
+  /** Price series used for option legs; lets the UI disclose model risk. */
+  optionDataMode: 'not_applicable' | 'market' | 'synthetic' | 'underlying_proxy'
+  assumptions: string[]
   equityCurve: EquityPoint[]
   drawdownCurve: { t: string; drawdown: number }[]
   trades: BacktestTrade[]
@@ -137,6 +155,9 @@ interface Position {
   entryFee: number
   entryBarIndex: number
   barsHeld: number
+  optionData?: OptionChainData
+  /** Last premium close, used only if a real chain has a sparse bar. */
+  lastMarkPrice: number
 }
 
 const MAX_CURVE_POINTS = 1600
@@ -259,7 +280,17 @@ export function runBacktestCore(input: {
   config: BacktestConfig
 }): BacktestResult {
   const { rules, candles, config } = input
-  const runtime = new IndicatorRuntime(collectIndicatorSpecs(rules))
+  const indicatorSpecs = collectIndicatorSpecs(rules)
+  const runtime = new IndicatorRuntime(indicatorSpecs)
+  const optionExecution = normalizeOptionExecution(rules)
+  const expiryBufferMs = optionExecution.expiryBufferMinutes * 60_000
+  const optionRuntimes = new Map<
+    string,
+    { runtime: IndicatorRuntime; previous?: Candle; framePrevious?: Candle; current?: Candle }
+  >()
+  const hasOptionLegs = (rules.legs?.length ?? 0) > 0
+  let sawMarketOptionData = false
+  let sawSyntheticOptionData = false
   const timeSqMinutes = rules.exit.timeSquareOff ? hhmmToMinutes(rules.exit.timeSquareOff.time) : null
   // Order Type / Risk Management gates (defaults applied for legacy strategies).
   const gates = buildSessionGates(rules)
@@ -280,6 +311,45 @@ export function runBacktestCore(input: {
   let barsInPosition = 0
   const tradesPerDay = new Map<string, number>()
   const firedLegs = new Set<string>()
+
+  const updateOptionFrames = (candle: Candle): void => {
+    for (const data of candle.optionChains?.values() ?? []) {
+      if (data.source === 'market') sawMarketOptionData = true
+      else sawSyntheticOptionData = true
+      let state = optionRuntimes.get(data.contractId)
+      if (!state) {
+        state = { runtime: new IndicatorRuntime(indicatorSpecs) }
+        optionRuntimes.set(data.contractId, state)
+      }
+      const premiumCandle = optionDataCandle(candle.time, data)
+      state.framePrevious = state.previous
+      state.runtime.update(premiumCandle)
+      state.current = premiumCandle
+      state.previous = premiumCandle
+    }
+  }
+
+  const optionFrameFor = (data: OptionChainData) => {
+    const state = optionRuntimes.get(data.contractId)
+    if (!state?.current) return undefined
+    return { current: state.current, previous: state.framePrevious, runtime: state.runtime }
+  }
+
+  const optionSnapshotForPosition = (candle: Candle, current: Position): OptionChainData | undefined => {
+    const entryData = current.optionData
+    if (!entryData) return undefined
+    const fromChain = candle.optionChains?.get(entryData.contractId)
+    if (fromChain) return fromChain
+    if (entryData.source !== 'synthetic') return undefined
+    return synthesizeOptionContract(candle, {
+      strike: entryData.strike,
+      optionType: entryData.optionType,
+      expiryType: entryData.expiryType,
+      expiry: entryData.expiry,
+      riskFreeRate: optionExecution.riskFreeRate,
+      impliedVolatility: entryData.impliedVol,
+    })
+  }
 
   const closePosition = (candle: Candle, barIndex: number, rawExitPrice: number, reason: BacktestTrade['exitReason']): void => {
     if (!position) return
@@ -304,6 +374,18 @@ export function runBacktestCore(input: {
       grossPnl: round2(gross),
       fees: round2(fees),
       netPnl: round2(netPnl),
+      ...(position.optionData
+        ? {
+            optionContract: {
+              strike: position.optionData.strike,
+              optionType: position.optionData.optionType,
+              expiry: position.optionData.expiry.toISOString(),
+              deltaAtEntry: round4(position.optionData.delta),
+              impliedVol: round4(position.optionData.impliedVol),
+              source: position.optionData.source,
+            },
+          }
+        : {}),
       exitReason: reason,
       barsHeld: position.barsHeld,
     })
@@ -315,6 +397,7 @@ export function runBacktestCore(input: {
   for (let i = 0; i < candles.length; i++) {
     const candle = candles[i]
     runtime.update(candle)
+    updateOptionFrames(candle)
     const frame = { current: candle, previous: i > 0 ? candles[i - 1] : undefined, runtime }
 
     // Overall profit/loss limits, the trailing floor and the halt flag are
@@ -331,6 +414,20 @@ export function runBacktestCore(input: {
     if (position) {
       position.barsHeld++
       barsInPosition++
+      const optionSnapshot = optionSnapshotForPosition(candle, position)
+      const positionCandle = optionSnapshot
+        ? optionDataCandle(candle.time, optionSnapshot)
+        : position.optionData
+          ? {
+              time: candle.time,
+              open: position.lastMarkPrice,
+              high: position.lastMarkPrice,
+              low: position.lastMarkPrice,
+              close: position.lastMarkPrice,
+              volume: 0,
+            }
+          : candle
+      if (optionSnapshot) position.lastMarkPrice = optionSnapshot.close
 
       // Order Type square-off: MIS/CNC close same day at the configured time;
       // BTST carries overnight and closes at the next-day square-off time.
@@ -340,49 +437,65 @@ export function runBacktestCore(input: {
           : isPastSquareOff(gates, candle.time)
       const cutoffHit =
         orderTypeCutoff || (timeSqMinutes != null && istMinutesOfDay(candle.time) >= timeSqMinutes)
+      const expiryBufferHit =
+        position.optionData != null &&
+        position.optionData.expiry.getTime() - candle.time.getTime() <= expiryBufferMs
       const maxHoldingHit = rules.exit.maxHoldingBars != null && position.barsHeld >= rules.exit.maxHoldingBars
 
       // Risk Management: overall profit/loss limits and the profit-trailing
       // floor evaluate on the running (realized + unrealized) strategy P&L.
       const openPnl =
         position.side === 'LONG'
-          ? (candle.close - position.entryPrice) * position.quantity
-          : (position.entryPrice - candle.close) * position.quantity
+          ? (positionCandle.close - position.entryPrice) * position.quantity
+          : (position.entryPrice - positionCandle.close) * position.quantity
       const runningPnl = realizedPnl + openPnl
       const overallHit = hitOverallLimit(gates.riskManagement, runningPnl)
       const trailingHit = trailer.shouldBook(runningPnl)
 
       if (overallHit === 'profit') {
-        closePosition(candle, i, candle.close, 'overall_profit')
+        closePosition(candle, i, positionCandle.close, 'overall_profit')
         strategyHalted = true
       } else if (overallHit === 'loss') {
-        closePosition(candle, i, candle.close, 'overall_loss')
+        closePosition(candle, i, positionCandle.close, 'overall_loss')
         strategyHalted = true
       } else if (trailingHit) {
-        closePosition(candle, i, candle.close, 'profit_trailing')
+        closePosition(candle, i, positionCandle.close, 'profit_trailing')
         strategyHalted = true
+      } else if (expiryBufferHit) {
+        closePosition(candle, i, positionCandle.close, 'expiry_squareoff')
       } else if (cutoffHit) {
-        closePosition(candle, i, candle.close, 'time_squareoff')
+        closePosition(candle, i, positionCandle.close, 'time_squareoff')
       } else if (maxHoldingHit) {
-        closePosition(candle, i, candle.close, 'max_holding')
+        closePosition(candle, i, positionCandle.close, 'max_holding')
       } else {
         // Exits evaluate against stop/target state as of BAR START (see header).
         let slPrice: number | undefined
         let targetPrice: number | undefined
         let slReason: BacktestTrade['exitReason'] = 'stop_loss'
         if (position.stopLoss != null) {
-          const hit = position.side === 'LONG' ? candle.low <= position.stopLoss : candle.high >= position.stopLoss
+          const hit =
+            position.side === 'LONG'
+              ? positionCandle.low <= position.stopLoss
+              : positionCandle.high >= position.stopLoss
           if (hit) {
             // Gap-through adjustment: if the open is already beyond the stop, fill at the open.
             slPrice =
-              position.side === 'LONG' ? Math.min(position.stopLoss, candle.open) : Math.max(position.stopLoss, candle.open)
+              position.side === 'LONG'
+                ? Math.min(position.stopLoss, positionCandle.open)
+                : Math.max(position.stopLoss, positionCandle.open)
             slReason = position.stopLossSource === 'trail' ? 'trailing_stop' : 'stop_loss'
           }
         }
         if (position.target != null) {
-          const hit = position.side === 'LONG' ? candle.high >= position.target : candle.low <= position.target
+          const hit =
+            position.side === 'LONG'
+              ? positionCandle.high >= position.target
+              : positionCandle.low <= position.target
           if (hit) {
-            targetPrice = position.side === 'LONG' ? Math.max(position.target, candle.open) : Math.min(position.target, candle.open)
+            targetPrice =
+              position.side === 'LONG'
+                ? Math.max(position.target, positionCandle.open)
+                : Math.min(position.target, positionCandle.open)
           }
         }
         if (slPrice != null && targetPrice != null) {
@@ -394,15 +507,18 @@ export function runBacktestCore(input: {
         }
 
         // Bar-end trail ratchet for the still-open position.
-        if (position) updateTrailing(position, candle)
+        if (position) updateTrailing(position, positionCandle)
       }
     }
 
     // ── Mark-to-market ──
+    const markSnapshot = position ? optionSnapshotForPosition(candle, position) : undefined
+    const markPrice = position?.optionData ? markSnapshot?.close ?? position.lastMarkPrice : candle.close
+    if (position && markSnapshot) position.lastMarkPrice = markSnapshot.close
     const unrealized = position
       ? position.side === 'LONG'
-        ? (candle.close - position.entryPrice) * position.quantity
-        : (position.entryPrice - candle.close) * position.quantity
+        ? (markPrice - position.entryPrice) * position.quantity
+        : (position.entryPrice - markPrice) * position.quantity
       : 0
     const equity = capital + unrealized
     runningPeak = Math.max(runningPeak, equity)
@@ -429,32 +545,85 @@ export function runBacktestCore(input: {
 
       // Resolve this bar's entry intent:
       //   - time-triggered legs (option-time) → schedule by leg.entryTime;
-      //   - legs without entry time (option-indicator) → signal-driven, legs set side/qty;
-      //   - no legs (stocks-futures) → signal-driven via direction.side + risk.quantity.
-      let trigger: { side: 'LONG' | 'SHORT'; qty: number } | null = null
+      //   - option-indicator legs → evaluate each leg's LONG/SHORT group on its
+      //     selected premium series;
+      //   - no legs (stocks/futures) → evaluate split directional groups.
+      let trigger: {
+        side: 'LONG' | 'SHORT'
+        qty: number
+        priceCandle: Candle
+        riskRuntime: IndicatorRuntime
+        optionData?: OptionChainData
+      } | null = null
       let firedLeg: StrategyRuleLeg | undefined
+      const hasOptionChain = (candle.optionChains?.size ?? 0) > 0
 
       if (hasTimeTriggeredLegs(rules.legs)) {
         const leg = pickScheduledLeg(rules.legs, candle, firedLegs)
         if (leg) {
-          trigger = { side: legSide(leg), qty: leg.qty }
-          firedLeg = leg
-        }
-      } else if (rules.legs?.length) {
-        if (evaluateEntrySignal(rules, frame)) {
-          const leg = rules.legs.find((l) => l.active)
-          trigger = {
-            side: leg ? legSide(leg) : rules.direction.side === 'long' ? 'LONG' : 'SHORT',
-            qty: leg ? leg.qty : rules.risk.quantity,
+          const optionData = selectOptionContract(candle, leg)
+          const optionFrame = optionData ? optionFrameFor(optionData) : undefined
+          // Legacy fallback remains available for direct core callers that have
+          // no chain at all. Production option runs are enriched by the service.
+          if (optionData && optionFrame) {
+            trigger = {
+              side: legSide(leg),
+              qty: leg.qty,
+              priceCandle: optionFrame.current,
+              riskRuntime: optionFrame.runtime,
+              optionData,
+            }
+            firedLeg = leg
+          } else if (!hasOptionChain) {
+            trigger = { side: legSide(leg), qty: leg.qty, priceCandle: candle, riskRuntime: runtime }
+            firedLeg = leg
           }
         }
-      } else if (evaluateEntrySignal(rules, frame)) {
-        trigger = { side: rules.direction.side === 'long' ? 'LONG' : 'SHORT', qty: rules.risk.quantity }
+      } else if (rules.legs?.length) {
+        for (const leg of rules.legs.filter((candidate) => candidate.active)) {
+          const direction = leg.condition === 'LONG' ? 'long' : 'short'
+          const optionData = selectOptionContract(candle, leg)
+          const optionFrame = optionData ? optionFrameFor(optionData) : undefined
+          if (optionData && optionFrame) {
+            if (evaluateEntrySignal(rules, optionFrame, direction)) {
+              trigger = {
+                side: legSide(leg),
+                qty: leg.qty,
+                priceCandle: optionFrame.current,
+                riskRuntime: optionFrame.runtime,
+                optionData,
+              }
+              break
+            }
+          } else if (!hasOptionChain && evaluateEntrySignal(rules, frame, direction)) {
+            trigger = { side: legSide(leg), qty: leg.qty, priceCandle: candle, riskRuntime: runtime }
+            break
+          }
+        }
+      } else {
+        const signal = evaluateDirectionalEntrySignals(rules, frame)[0]
+        if (signal) {
+          trigger = {
+            side: signal === 'long' ? 'LONG' : 'SHORT',
+            qty: rules.risk.quantity,
+            priceCandle: candle,
+            riskRuntime: runtime,
+          }
+        }
       }
 
-      if (trigger && !pastCutoff && underTradeLimit) {
+      const optionPastBuffer =
+        trigger?.optionData != null &&
+        trigger.optionData.expiry.getTime() - candle.time.getTime() <= expiryBufferMs
+      const deltaBlocked =
+        trigger?.optionData != null &&
+        optionExecution.minAbsDelta != null &&
+        Math.abs(trigger.optionData.delta) < optionExecution.minAbsDelta
+      const entryBlocked = pastCutoff || optionPastBuffer || deltaBlocked
+
+      if (trigger && !entryBlocked && underTradeLimit) {
         const entrySide: 'buy' | 'sell' = trigger.side === 'LONG' ? 'buy' : 'sell'
-        const fill = slippageAdjust(candle.close, config.slippagePercent, entrySide)
+        const fill = slippageAdjust(trigger.priceCandle.close, config.slippagePercent, entrySide)
 
         // Capital-allocation % enforcement (spec §3.4 step 4) — skip if notional exceeds the cap.
         if (rules.risk.capitalAllocationPercent != null) {
@@ -466,7 +635,7 @@ export function runBacktestCore(input: {
           }
         }
 
-        const risk = initialStopAndTarget(rules, fill, runtime, trigger.side)
+        const risk = initialStopAndTarget(rules, fill, trigger.riskRuntime, trigger.side)
         position = {
           side: trigger.side,
           quantity: trigger.qty,
@@ -480,18 +649,23 @@ export function runBacktestCore(input: {
           entryFee: feeFor(fill * trigger.qty, config),
           entryBarIndex: i,
           barsHeld: 0,
+          optionData: trigger.optionData,
+          lastMarkPrice: trigger.priceCandle.close,
         }
         if (firedLeg) markLegFired(firedLeg, candle, firedLegs)
         tradesPerDay.set(dayKey, tradesToday + 1)
-      } else if (trigger && (pastCutoff || !underTradeLimit)) {
+      } else if (trigger && (entryBlocked || !underTradeLimit)) {
         skippedSignals++
       }
     }
   }
 
-  // EoD flush: still-open position closes at last close (spec bookkeeping completeness).
-  if (position) {
-    closePosition(candles[candles.length - 1], candles.length - 1, candles[candles.length - 1].close, 'end_of_data')
+  // EoD flush: still-open position closes at the final premium/underlying close.
+  if (position && candles.length > 0) {
+    const last = candles[candles.length - 1]
+    const optionSnapshot = optionSnapshotForPosition(last, position)
+    const exitPrice = position.optionData ? optionSnapshot?.close ?? position.lastMarkPrice : last.close
+    closePosition(last, candles.length - 1, exitPrice, 'end_of_data')
   }
 
   // ── Summary stats ──
@@ -527,8 +701,31 @@ export function runBacktestCore(input: {
     candlesProcessed: candles.length,
   }
 
+  const optionDataMode: BacktestResult['optionDataMode'] = !hasOptionLegs
+    ? 'not_applicable'
+    : sawSyntheticOptionData
+      ? 'synthetic'
+      : sawMarketOptionData
+        ? 'market'
+        : 'underlying_proxy'
+  const assumptions: string[] = []
+  if (optionDataMode === 'synthetic') {
+    assumptions.push(
+      `Historical option premiums were synthesized with Black–Scholes (IV ${(optionExecution.impliedVolatility * 100).toFixed(2)}%, risk-free rate ${(optionExecution.riskFreeRate * 100).toFixed(2)}%).`,
+      'Synthetic premiums do not model bid/ask spreads, liquidity, IV skew, discrete dividends, or exchange-holiday expiry adjustments.',
+    )
+  } else if (optionDataMode === 'underlying_proxy') {
+    assumptions.push('No option chain was supplied; option legs used the legacy underlying-price proxy.')
+  }
+  if (hasOptionLegs && optionExecution.minAbsDelta != null) {
+    assumptions.push(`Entries required absolute delta >= ${optionExecution.minAbsDelta}.`)
+  }
+  if (hasOptionLegs) assumptions.push(`Positions were closed ${optionExecution.expiryBufferMinutes} minutes before expiry.`)
+
   return {
     summary,
+    optionDataMode,
+    assumptions,
     equityCurve: downsample(equityPoints),
     drawdownCurve: downsample(drawdownPoints),
     trades,
@@ -554,4 +751,8 @@ function buildDailyRows(trades: BacktestTrade[], dailyEquity: Map<string, number
 
 function round2(v: number): number {
   return Math.round(v * 100) / 100
+}
+
+function round4(v: number): number {
+  return Math.round(v * 10_000) / 10_000
 }

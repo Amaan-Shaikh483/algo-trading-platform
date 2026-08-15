@@ -5,7 +5,7 @@ import type { PositionRow, StrategyRow } from '../../supabase/types'
 import { logger } from '../../lib/logger'
 import { notify } from '../userEvents'
 import { IndicatorRuntime, collectIndicatorSpecs, hhmmToMinutes, istDayKey, istMinutesOfDay } from '../engine/indicatorEngine'
-import { evaluateEntrySignal } from '../engine/ruleEvaluator'
+import { evaluateDirectionalEntrySignals, evaluateEntrySignal } from '../engine/ruleEvaluator'
 import { hasTimeTriggeredLegs, legSide, markLegFired, pickScheduledLeg } from '../engine/timeTriggers'
 import {
   ProfitTrailer,
@@ -71,6 +71,8 @@ export class StrategyRuntime {
   private firstLiveBucketMs = 0
   private exitRetryNotBefore = 0
   private pendingExitReason: LiveExitReason | null = null
+  private pendingEntrySide: 'LONG' | 'SHORT' | null = null
+  private pendingEntryQuantity: number | null = null
   private stopped = false
   private firedLegs = new Set<string>()
   /** Order Type + Risk Management gates (defaults applied for legacy strategies). */
@@ -291,7 +293,9 @@ export class StrategyRuntime {
       // Resolve entry intent (mirrors runBacktestCore): time-triggered legs,
       // leg-defined signal entries, or classic direction-based signal entry.
       let leg: StrategyRuleLeg | undefined
+      let signalSide: 'LONG' | 'SHORT' | undefined
       let shouldEnter = false
+      const frame = { current: candle, previous: this.previousCandle, runtime: this.indicatorRt }
 
       if (hasTimeTriggeredLegs(this.rules.legs)) {
         const scheduled = pickScheduledLeg(this.rules.legs, candle, this.firedLegs)
@@ -300,16 +304,22 @@ export class StrategyRuntime {
           shouldEnter = true
         }
       } else if (this.rules.legs?.length) {
-        if (evaluateEntrySignal(this.rules, { current: candle, previous: this.previousCandle, runtime: this.indicatorRt })) {
-          leg = this.rules.legs.find((l) => l.active)
+        leg = this.rules.legs.find((candidate) => {
+          if (!candidate.active) return false
+          const direction = candidate.condition === 'LONG' ? 'long' : 'short'
+          return evaluateEntrySignal(this.rules, frame, direction)
+        })
+        shouldEnter = leg != null
+      } else {
+        const direction = evaluateDirectionalEntrySignals(this.rules, frame)[0]
+        if (direction) {
+          signalSide = direction === 'long' ? 'LONG' : 'SHORT'
           shouldEnter = true
         }
-      } else if (evaluateEntrySignal(this.rules, { current: candle, previous: this.previousCandle, runtime: this.indicatorRt })) {
-        shouldEnter = true
       }
 
       if (shouldEnter && !pastCutoff && underTradeLimit) {
-        await this.requestEntry(candle, leg)
+        await this.requestEntry(candle, leg, signalSide)
       }
     }
 
@@ -334,10 +344,14 @@ export class StrategyRuntime {
     this.inflight = false
     if (order.status !== 'complete' || order.average_price == null) {
       // rejected/cancelled while in-flight — resume normal operation.
+      if (order.purpose === 'entry') {
+        this.pendingEntrySide = null
+        this.pendingEntryQuantity = null
+      }
       return
     }
     if (order.purpose === 'entry' && !this.position) {
-      const side = this.rules.direction.side === 'long' ? 'LONG' : 'SHORT'
+      const side = this.pendingEntrySide ?? (this.rules.direction.side === 'long' ? 'LONG' : 'SHORT')
       const fill = Number(order.average_price)
       const levels = initialStopAndTarget(this.rules, fill, this.indicatorRt, side)
       this.position = await ledger.openPosition({
@@ -347,13 +361,15 @@ export class StrategyRuntime {
         symbolToken: this.symbolToken,
         exchange: this.exchange,
         side,
-        quantity: order.filled_quantity || this.rules.risk.quantity,
+        quantity: order.filled_quantity || this.pendingEntryQuantity || this.rules.risk.quantity,
         entryPrice: fill,
         mode: this.mode,
         runtimeState: toState(levels, { barsHeld: 0, entryTime: new Date().toISOString() }),
       })
       this.positionState = readState(this.position)
       this.tradesToday++
+      this.pendingEntrySide = null
+      this.pendingEntryQuantity = null
     } else if (order.purpose === 'exit' && this.position) {
       await this.bookExit(this.position, Number(order.average_price), this.pendingExitReason ?? 'strategy_stopped')
       this.pendingExitReason = null
@@ -362,10 +378,16 @@ export class StrategyRuntime {
 
   // ── Internals ──
 
-  private async requestEntry(candle: Candle, leg?: StrategyRuleLeg): Promise<void> {
+  private async requestEntry(
+    candle: Candle,
+    leg?: StrategyRuleLeg,
+    signalSide?: 'LONG' | 'SHORT',
+  ): Promise<void> {
     this.inflight = true
-    const side = leg ? legSide(leg) : this.rules.direction.side === 'long' ? 'LONG' : 'SHORT'
+    const side = leg ? legSide(leg) : signalSide ?? (this.rules.direction.side === 'long' ? 'LONG' : 'SHORT')
     const quantity = leg ? leg.qty : this.rules.risk.quantity
+    this.pendingEntrySide = side
+    this.pendingEntryQuantity = quantity
     const approxPrice = candle.close
     try {
       if (this.mode === 'live' && this.rules.risk.capitalAllocationPercent != null && this.deps.availableMarginFor) {
@@ -374,6 +396,8 @@ export class StrategyRuntime {
           const cap = (margin * this.rules.risk.capitalAllocationPercent) / 100
           if (approxPrice * quantity > cap) {
             logger.warn('entry skipped: capitalAllocation% cap (RMS)', { strategyId: this.id, cap, notional: approxPrice * quantity })
+            this.pendingEntrySide = null
+            this.pendingEntryQuantity = null
             this.inflight = false
             return
           }
@@ -402,6 +426,8 @@ export class StrategyRuntime {
     } catch (err) {
       logger.error('entry intent failed', { strategyId: this.id, error: (err as Error).message })
       await notify(this.userId, 'strategy_error', `Strategy runtime error: ${this.name}`, (err as Error).message)
+      this.pendingEntrySide = null
+      this.pendingEntryQuantity = null
       this.inflight = false
     }
   }
@@ -424,12 +450,16 @@ export class StrategyRuntime {
       })
       this.positionState = readState(this.position)
       this.tradesToday++
+      this.pendingEntrySide = null
+      this.pendingEntryQuantity = null
       this.inflight = false
       logger.info('position opened', { strategyId: this.id, side, fill, mode: this.mode })
       return
     }
     if (outcome.outcome === 'blocked' || outcome.outcome === 'rejected' || outcome.outcome === 'failed') {
       logger.warn('entry not authorized/placed', { strategyId: this.id, outcome: outcome.outcome, reason: outcome.reason })
+      this.pendingEntrySide = null
+      this.pendingEntryQuantity = null
       this.inflight = false
       return
     }
