@@ -3,8 +3,11 @@ import { TextInput } from '../../components/ui'
 import {
   CNC_SLIDER_MAX,
   CNC_SLIDER_MIN,
+  CHART_TYPES,
+  INTERVAL_OPTIONS,
   ORDER_TYPE_OPTIONS,
   TRADING_DAY_OPTIONS,
+  TRANSACTION_TYPES,
 } from './builderState'
 import type { BuilderState, OrderTypeNew } from './builderState'
 import type { TradingDay } from '@algo/rule-schema'
@@ -169,9 +172,11 @@ interface Props {
   name: string
   /** Which state key holds the selection for this form. */
   field: 'sfOrderType' | 'optOrderType'
+  /** Indicator-based options keep their existing trade controls in this card. */
+  includeTradeConfiguration?: boolean
 }
 
-export default function OrderTypeSection({ state, patch, name, field }: Props) {
+export default function OrderTypeSection({ state, patch, name, field, includeTradeConfiguration = false }: Props) {
   const value = state[field]
   const isBtst = value === 'BTST'
   const isCnc = value === 'CNC'
@@ -250,6 +255,71 @@ export default function OrderTypeSection({ state, patch, name, field }: Props) {
         )}
 
         <TradingDaysPicker value={state.tradingDays} onChange={(tradingDays) => patch({ tradingDays })} />
+
+        {includeTradeConfiguration && (
+          <div className="grid gap-5 border-t border-gray-100 pt-5 sm:grid-cols-2">
+            <div>
+              <span className="mb-2 block text-sm font-medium text-gray-700">Transaction Type</span>
+              <div className="flex flex-wrap gap-2">
+                {TRANSACTION_TYPES.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    aria-pressed={state.transactionType === opt.value}
+                    onClick={() => patch({ transactionType: opt.value })}
+                    className={`rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
+                      state.transactionType === opt.value
+                        ? 'border-brand-300 bg-brand-50 text-brand-700'
+                        : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <span className="mb-2 block text-sm font-medium text-gray-700">Chart Type</span>
+              <div className="flex flex-wrap gap-2">
+                {CHART_TYPES.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    aria-pressed={state.chartType === opt.value}
+                    onClick={() => patch({ chartType: opt.value })}
+                    className={`rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
+                      state.chartType === opt.value
+                        ? 'border-brand-300 bg-brand-50 text-brand-700'
+                        : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="sm:col-span-2">
+              <span className="mb-2 block text-sm font-medium text-gray-700">Interval</span>
+              <div className="flex flex-wrap gap-2">
+                {INTERVAL_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    aria-pressed={state.interval === opt.value}
+                    onClick={() => patch({ interval: opt.value })}
+                    className={`rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
+                      state.interval === opt.value
+                        ? 'border-brand-300 bg-brand-50 text-brand-700'
+                        : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </SectionCard>
   )
