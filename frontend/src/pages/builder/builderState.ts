@@ -5,6 +5,7 @@ import {
   newConditionId,
   normalizeOrderType,
   normalizeRiskManagement,
+  normalizeOptionExecution,
   productTypeForOrderType,
   defaultRules,
 } from '@algo/rule-schema'
@@ -169,6 +170,12 @@ export interface BuilderState {
   underlyingInstrument: InstrumentHit | null
   optOrderType: OrderTypeNew
   legs: OptionLeg[]
+  /** Absolute-delta entry floor (0 disables the filter). */
+  optionMinAbsDelta: string
+  optionExpiryBufferMinutes: string
+  /** Percent values in the UI; serialized as decimals. */
+  optionRiskFreeRatePercent: string
+  optionImpliedVolatilityPercent: string
 
   // Exit conditions (shared)
   exitConditionsEnabled: boolean
@@ -298,6 +305,10 @@ export function initialBuilderState(): BuilderState {
     underlyingInstrument: null,
     optOrderType: 'MIS',
     legs: [newOptionLeg(1)],
+    optionMinAbsDelta: '0.5',
+    optionExpiryBufferMinutes: '30',
+    optionRiskFreeRatePercent: '6',
+    optionImpliedVolatilityPercent: '20',
 
     // Exit
     exitConditionsEnabled: false,
@@ -616,17 +627,27 @@ export function hydrateLegs(legs?: StrategyRuleLeg[]): OptionLeg[] {
 
 /** Assemble the persistable rule tree for all strategy types. */
 export function toRules(state: BuilderState): StrategyRules {
-  // Merge long+short conditions into the engine-consumed entryConditions group.
-  const allConditions = [...state.longEntryConditions, ...state.shortEntryConditions]
+  // Keep the legacy group actionable without combining mutually-exclusive
+  // long and short signals. New engines consume the split groups directly.
+  const legacyConditions =
+    (state.direction === 'short' ? state.shortEntryConditions : state.longEntryConditions).length > 0
+      ? state.direction === 'short'
+        ? state.shortEntryConditions
+        : state.longEntryConditions
+      : state.entryConditions
   const orderTypeNew = state.strategyType === 'stocks-futures' ? state.sfOrderType : state.optOrderType
   const optionLegs = isOptionStrategy(state.strategyType) ? state.legs : []
+  const minAbsDelta = Number(state.optionMinAbsDelta)
+  const expiryBufferMinutes = Number(state.optionExpiryBufferMinutes)
+  const riskFreeRate = Number(state.optionRiskFreeRatePercent) / 100
+  const impliedVolatility = Number(state.optionImpliedVolatilityPercent) / 100
 
   return {
     version: RULE_SCHEMA_VERSION,
     strategyType: state.strategyType,
     direction: { side: state.direction },
     entry: { orderType: state.orderType, productType: toProductType(orderTypeNew) },
-    entryConditions: { combinator: 'and', conditions: allConditions.length > 0 ? allConditions : state.entryConditions },
+    entryConditions: { combinator: state.combinator, conditions: legacyConditions },
     longEntryConditions: groupOf(state.longEntryConditions),
     shortEntryConditions: groupOf(state.shortEntryConditions),
     legs:
@@ -635,6 +656,18 @@ export function toRules(state: BuilderState): StrategyRules {
         : undefined,
     ...(state.strategyType === 'option-indicator'
       ? { tradeConfiguration: { transactionType: state.transactionType, chartType: state.chartType } }
+      : {}),
+    ...(isOptionStrategy(state.strategyType)
+      ? {
+          optionExecution: {
+            ...(state.strategyType === 'option-indicator' && Number.isFinite(minAbsDelta) && minAbsDelta > 0
+              ? { minAbsDelta }
+              : {}),
+            expiryBufferMinutes: Number.isFinite(expiryBufferMinutes) ? Math.round(expiryBufferMinutes) : 30,
+            riskFreeRate: Number.isFinite(riskFreeRate) ? riskFreeRate : 0.06,
+            impliedVolatility: Number.isFinite(impliedVolatility) ? impliedVolatility : 0.2,
+          },
+        }
       : {}),
     exit: deriveExit(state),
     risk: {
@@ -735,6 +768,7 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
       // strategy never opens with blank/incorrect sections.
       const ot = normalizeOrderType(r)
       const rm = normalizeRiskManagement(r)
+      const oe = normalizeOptionExecution(r)
       const trailing = rm.profitTrailing
       const str = (v: number | undefined): string => (v == null ? '' : String(v))
       return {
@@ -756,6 +790,10 @@ export function fromStrategyRow(row: StrategyRowView): BuilderState {
         trailProfitBy: str(trailing.trailProfitBy),
         exitProfitAmount: rm.exitProfit != null ? String(rm.exitProfit) : restoredProfit,
         exitLossAmount: rm.exitLoss != null ? String(rm.exitLoss) : restoredLoss,
+        optionMinAbsDelta: oe.minAbsDelta == null ? '0' : String(oe.minAbsDelta),
+        optionExpiryBufferMinutes: String(oe.expiryBufferMinutes),
+        optionRiskFreeRatePercent: String(oe.riskFreeRate * 100),
+        optionImpliedVolatilityPercent: String(oe.impliedVolatility * 100),
       }
     })(),
     exit: {
@@ -866,6 +904,17 @@ export function configErrors(state: BuilderState): string[] {
     const v = raw?.trim()
     if (!v) errors.push(`${label} is required for ${state.profitTrailing} trailing`)
     else if (!Number.isFinite(Number(v)) || Number(v) <= 0) errors.push(`${label} must be a positive number`)
+  }
+
+  if (isOptionStrategy(state.strategyType)) {
+    const delta = Number(state.optionMinAbsDelta)
+    if (!Number.isFinite(delta) || delta < 0 || delta > 1) errors.push('Minimum absolute delta must be between 0 and 1')
+    const buffer = Number(state.optionExpiryBufferMinutes)
+    if (!Number.isInteger(buffer) || buffer < 0 || buffer > 1440) errors.push('Expiry buffer must be 0–1440 whole minutes')
+    const rate = Number(state.optionRiskFreeRatePercent)
+    if (!Number.isFinite(rate) || rate < -100 || rate > 100) errors.push('Risk-free rate must be between -100% and 100%')
+    const iv = Number(state.optionImpliedVolatilityPercent)
+    if (!Number.isFinite(iv) || iv <= 0 || iv > 500) errors.push('Implied volatility must be greater than 0% and at most 500%')
   }
 
   return errors

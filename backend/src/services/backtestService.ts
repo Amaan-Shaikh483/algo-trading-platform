@@ -6,6 +6,7 @@ import { notify } from './userEvents'
 import { getSessionAdapterForUser } from './brokerConnectionService'
 import { runBacktestCore } from './engine/backtestEngine'
 import type { BacktestConfig, BacktestResult } from './engine/backtestEngine'
+import { attachSyntheticOptionChains } from './engine/optionMarketData'
 import type { Candle } from './brokers/types'
 import type { BacktestRunRow } from '../supabase/types'
 
@@ -266,7 +267,17 @@ async function processRun(run: BacktestRunRow): Promise<void> {
       brokerageValue: params.brokerageValue,
       slippagePercent: params.slippagePercent,
     }
-    const result: BacktestResult = runBacktestCore({ rules, candles, config })
+    // SmartAPI does not retain expired option-chain/Greek history. For option
+    // rules, enrich the underlying bars with a disclosed Black–Scholes premium
+    // series so indicators, fills and exits operate on option prices instead
+    // of silently reusing the underlying index.
+    const replayCandles = rules.legs?.length
+      ? attachSyntheticOptionChains(candles, rules, {
+          exchange: strategy.exchange,
+          instrument: strategy.instrument,
+        })
+      : candles
+    const result: BacktestResult = runBacktestCore({ rules, candles: replayCandles, config })
 
     await finish({ status: 'completed', progress: 100, result: result as never, error: null })
     await notify(run.user_id, 'backtest_completed', `Backtest complete: ${params.strategyName}`, `Net P&L ₹${result.summary.totalNetPnl} over ${result.summary.totalTrades} trades (${candles.length} candles).`)

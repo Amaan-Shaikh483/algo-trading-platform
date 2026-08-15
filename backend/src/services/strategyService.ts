@@ -7,6 +7,7 @@ import {
   TIMEFRAMES,
   normalizeOrderType,
   normalizeRiskManagement,
+  normalizeOptionExecution,
   productTypeForOrderType,
   validateStrategyRules,
 } from '@algo/rule-schema'
@@ -144,9 +145,10 @@ function sanitizeRules(rules: unknown): StrategyRules {
   //   * the persisted blob is always canonical (times validated, CNC days
   //     clamped to 0…4, trailing fields pruned to the selected mode).
   const riskManagement = normalizeRiskManagement(parsed)
+  const optionExecution = parsed.legs?.length ? normalizeOptionExecution(parsed) : undefined
   if (isOptionTimeRules(parsed)) {
     const { orderType: _ignored, ...legacyRules } = parsed
-    return { ...legacyRules, riskManagement } as StrategyRules
+    return { ...legacyRules, riskManagement, ...(optionExecution ? { optionExecution } : {}) } as StrategyRules
   }
 
   const orderType = normalizeOrderType(parsed)
@@ -154,6 +156,7 @@ function sanitizeRules(rules: unknown): StrategyRules {
     ...parsed,
     orderType,
     riskManagement,
+    ...(optionExecution ? { optionExecution } : {}),
     // Keep the broker-facing product type in step with the chosen order type.
     entry: { ...parsed.entry, productType: productTypeForOrderType(orderType.type) },
   }

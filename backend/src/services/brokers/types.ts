@@ -146,6 +146,39 @@ export interface CandleInput {
   to: Date
 }
 
+export type OptionContractType = 'CE' | 'PE'
+export type OptionDataSource = 'market' | 'synthetic'
+
+/**
+ * A single contract snapshot attached to an underlying candle during an
+ * options backtest. `open`/`high`/`low`/`close` are OPTION PREMIUM prices, not
+ * underlying prices. Maps are keyed by `contractId` (not strike alone), since
+ * CE and PE contracts can share a strike and expiry.
+ */
+export interface OptionChainData {
+  contractId: string
+  source: OptionDataSource
+  underlying: number
+  strike: number
+  optionType: OptionContractType
+  expiryType: 'WEEKLY' | 'MONTHLY'
+  expiry: Date
+  premium: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  delta: number
+  gamma: number
+  /** Vega per one percentage-point change in volatility. */
+  vega: number
+  /** Theta per calendar day. */
+  theta: number
+  impliedVol: number
+  timeToExpiry: number
+}
+
 export interface Candle {
   time: Date
   open: number
@@ -153,6 +186,8 @@ export interface Candle {
   low: number
   close: number
   volume: number
+  /** Optional option contracts aligned to this underlying bar. */
+  optionChains?: ReadonlyMap<string, OptionChainData>
 }
 
 export interface LtpQuote {

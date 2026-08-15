@@ -26,8 +26,12 @@ const EXIT_REASON_LABELS: Record<ExitReason, string> = {
   trailing_stop: 'Trailing SL',
   target: 'Target',
   time_squareoff: 'Time square-off',
+  expiry_squareoff: 'Expiry buffer',
   max_holding: 'Max holding',
   end_of_data: 'End of data',
+  overall_profit: 'Overall profit',
+  overall_loss: 'Overall loss',
+  profit_trailing: 'Profit trailing',
 }
 
 /* ───────────────────────── run form ───────────────────────── */
@@ -379,10 +383,10 @@ function TradesTable({ trades, strategyName }: { trades: BacktestTrade[]; strate
   )
 
   const exportCsv = () => {
-    const cols = ['entry_time_ist', 'exit_time_ist', 'side', 'quantity', 'entry_price', 'exit_price', 'gross_pnl', 'fees', 'net_pnl', 'exit_reason', 'bars_held']
+    const cols = ['entry_time_ist', 'exit_time_ist', 'side', 'contract', 'delta_at_entry', 'iv', 'quantity', 'entry_price', 'exit_price', 'gross_pnl', 'fees', 'net_pnl', 'exit_reason', 'bars_held']
     const q = (v: unknown) => `"${String(v).replace(/"/g, '""')}"`
     const rows = filtered.map((t) =>
-      [fmtTime(t.entryTime), fmtTime(t.exitTime), t.side, t.quantity, t.entryPrice, t.exitPrice, t.grossPnl, t.fees, t.netPnl, EXIT_REASON_LABELS[t.exitReason], t.barsHeld]
+      [fmtTime(t.entryTime), fmtTime(t.exitTime), t.side, t.optionContract ? `${t.optionContract.strike} ${t.optionContract.optionType}` : '', t.optionContract?.deltaAtEntry ?? '', t.optionContract?.impliedVol ?? '', t.quantity, t.entryPrice, t.exitPrice, t.grossPnl, t.fees, t.netPnl, EXIT_REASON_LABELS[t.exitReason], t.barsHeld]
         .map(q)
         .join(','),
     )
@@ -444,6 +448,7 @@ function TradesTable({ trades, strategyName }: { trades: BacktestTrade[]; strate
                 {header('entryTime', 'Entry (IST)', 'left')}
                 {header('exitTime', 'Exit (IST)', 'left')}
                 {header('side', 'Side', 'left')}
+                <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-400">Contract / Greeks</th>
                 {header('quantity', 'Qty')}
                 {header('entryPrice', 'Entry ₹')}
                 {header('exitPrice', 'Exit ₹')}
@@ -464,6 +469,16 @@ function TradesTable({ trades, strategyName }: { trades: BacktestTrade[]; strate
                     <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${t.side === 'LONG' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'}`}>
                       {t.side}
                     </span>
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-600">
+                    {t.optionContract ? (
+                      <>
+                        <span className="font-semibold">{t.optionContract.strike.toLocaleString('en-IN')} {t.optionContract.optionType}</span>
+                        <span className="block text-[10px] text-gray-400">
+                          Δ {t.optionContract.deltaAtEntry.toFixed(3)} · IV {(t.optionContract.impliedVol * 100).toFixed(1)}%
+                        </span>
+                      </>
+                    ) : '—'}
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums text-gray-700">{t.quantity}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-gray-700">{t.entryPrice.toLocaleString('en-IN')}</td>
@@ -744,6 +759,22 @@ function Results({ detail }: { detail: BacktestRunDetail }) {
 
   return (
     <div className="space-y-5">
+      {r.optionDataMode === 'synthetic' && (
+        <Alert tone="yellow" title="Synthetic option-premium backtest">
+          Angel One does not retain expired option-chain history, so this run priced contracts with Black–Scholes. Treat
+          the result as a model study, not as evidence of achievable returns.
+          {(r.assumptions?.length ?? 0) > 0 && (
+            <ul className="mt-2 list-disc space-y-1 pl-5">
+              {r.assumptions?.map((assumption) => <li key={assumption}>{assumption}</li>)}
+            </ul>
+          )}
+        </Alert>
+      )}
+      {r.optionDataMode === 'underlying_proxy' && (
+        <Alert tone="yellow" title="Option prices unavailable">
+          This legacy run used underlying candles as an option-leg proxy. Re-run it to get premium-based synthetic data.
+        </Alert>
+      )}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
         <StatCard label="Net P&L" value={inr(s.totalNetPnl)} sub={`${pct(s.totalReturnPct)} on ${inr(s.initialCapital)}`} tone={pnlTone(s.totalNetPnl)} />
         <StatCard label="Win rate" value={pct(s.winRate)} sub={`${s.wins}W / ${s.losses}L of ${s.totalTrades}`} />

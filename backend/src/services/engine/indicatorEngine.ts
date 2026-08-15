@@ -241,9 +241,12 @@ export function collectIndicatorSpecs(rules: StrategyRules): IndicatorSpec[] {
   const addOperand = (op: Operand) => {
     if (op.kind === 'indicator') addIndicator(op.indicator, op.params)
   }
-  for (const c of rules.entryConditions.conditions) {
-    addOperand(c.left)
-    addOperand(c.right)
+  const groups = [rules.entryConditions, rules.longEntryConditions, rules.shortEntryConditions]
+  for (const group of groups) {
+    for (const c of group?.conditions ?? []) {
+      addOperand(c.left)
+      addOperand(c.right)
+    }
   }
   if (rules.exit.stopLoss?.type === 'atr') {
     addIndicator('atr', { period: rules.exit.stopLoss.atrPeriod ?? 14 })

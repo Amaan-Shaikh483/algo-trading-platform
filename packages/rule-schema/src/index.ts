@@ -365,6 +365,18 @@ export interface TradeConfiguration {
   chartType: 'Candle' | 'Heikin Ashi'
 }
 
+/** Option-only execution and historical-pricing controls. */
+export interface OptionExecutionConfig {
+  /** Skip entries whose absolute Black–Scholes/market delta is below this value. */
+  minAbsDelta?: number
+  /** Block new entries and close open contracts this many minutes before expiry. */
+  expiryBufferMinutes: number
+  /** Annual risk-free rate as a decimal (`0.06` = 6%). */
+  riskFreeRate: number
+  /** Annual IV used only when historical premiums must be synthesized (`0.20` = 20%). */
+  impliedVolatility: number
+}
+
 export interface StrategyRules {
   version: typeof RULE_SCHEMA_VERSION
   /** Builder discriminator used to keep Indicator and Time Based persistence separate. */
@@ -379,6 +391,8 @@ export interface StrategyRules {
   legs?: StrategyRuleLeg[]
   /** Indicator-builder controls persisted in rules; interval remains the strategy timeframe. */
   tradeConfiguration?: TradeConfiguration
+  /** Pricing/Greek/expiry behavior for option legs. Optional for legacy rules. */
+  optionExecution?: OptionExecutionConfig
   exit: ExitRules
   risk: RiskRules
   /**
@@ -424,6 +438,31 @@ export function defaultProfitTrailing(): ProfitTrailingConfig {
 
 export function defaultRiskManagement(): RiskManagementConfig {
   return { maxTradeCycle: 1, noTradeAfter: '15:10', profitTrailing: defaultProfitTrailing() }
+}
+
+export function defaultOptionExecution(): OptionExecutionConfig {
+  return {
+    minAbsDelta: 0.5,
+    expiryBufferMinutes: 30,
+    riskFreeRate: 0.06,
+    impliedVolatility: 0.2,
+  }
+}
+
+/** Apply bounded defaults when reading option rules saved before this block existed. */
+export function normalizeOptionExecution(rules: Partial<StrategyRules> | undefined): OptionExecutionConfig {
+  const raw = rules?.optionExecution
+  const base = defaultOptionExecution()
+  const minAbsDelta = finite(raw?.minAbsDelta)
+  const buffer = finite(raw?.expiryBufferMinutes)
+  const rate = finite(raw?.riskFreeRate)
+  const iv = finite(raw?.impliedVolatility)
+  return {
+    ...(minAbsDelta == null ? {} : { minAbsDelta: Math.min(1, Math.max(0, minAbsDelta)) }),
+    expiryBufferMinutes: buffer == null ? base.expiryBufferMinutes : Math.min(1440, Math.max(0, Math.round(buffer))),
+    riskFreeRate: rate == null ? base.riskFreeRate : Math.min(1, Math.max(-1, rate)),
+    impliedVolatility: iv == null ? base.impliedVolatility : Math.min(5, Math.max(0.0001, iv)),
+  }
 }
 
 /** Map the builder order type onto the broker product type the engines use. */
@@ -804,6 +843,9 @@ export function validateStrategyRules(rules: unknown): { valid: boolean; errors:
   validateGroup(r.shortEntryConditions, 'shortEntryConditions')
 
   // Option strategy legs (optional — option-indicator & option-time)
+  const hasDirectionalConditions =
+    (r.longEntryConditions?.conditions.length ?? 0) > 0 ||
+    (r.shortEntryConditions?.conditions.length ?? 0) > 0
   const legs = r.legs
   if (legs != null) {
     if (!Array.isArray(legs)) errors.push('legs must be an array')
@@ -821,11 +863,13 @@ export function validateStrategyRules(rules: unknown): { valid: boolean; errors:
         if (!Number.isInteger(leg.qty) || leg.qty < 1) errors.push(`${p}: qty must be a positive integer`)
       })
 
-    // Option strategies need at least a leg or an entry condition to be actionable.
-    if (conditions.length === 0 && legs.length === 0) {
+    // Option-time can be actionable from scheduled legs alone; indicator
+    // strategies may use the direction-specific groups instead of the legacy
+    // entryConditions group.
+    if (conditions.length === 0 && !hasDirectionalConditions && legs.length === 0) {
       errors.push('at least one entry condition or strategy leg is required')
     }
-  } else if (conditions.length === 0) {
+  } else if (conditions.length === 0 && !hasDirectionalConditions) {
     errors.push('at least one entry condition is required')
   }
 
@@ -911,6 +955,22 @@ export function validateStrategyRules(rules: unknown): { valid: boolean; errors:
     }
     if (!['Candle', 'Heikin Ashi'].includes(r.tradeConfiguration.chartType)) {
       errors.push('tradeConfiguration.chartType is invalid')
+    }
+  }
+
+  if (r.optionExecution != null) {
+    const cfg = r.optionExecution
+    if (cfg.minAbsDelta != null && (!Number.isFinite(cfg.minAbsDelta) || cfg.minAbsDelta < 0 || cfg.minAbsDelta > 1)) {
+      errors.push('optionExecution.minAbsDelta must be between 0 and 1')
+    }
+    if (!Number.isInteger(cfg.expiryBufferMinutes) || cfg.expiryBufferMinutes < 0 || cfg.expiryBufferMinutes > 1440) {
+      errors.push('optionExecution.expiryBufferMinutes must be an integer between 0 and 1440')
+    }
+    if (!Number.isFinite(cfg.riskFreeRate) || cfg.riskFreeRate < -1 || cfg.riskFreeRate > 1) {
+      errors.push('optionExecution.riskFreeRate must be between -1 and 1')
+    }
+    if (!Number.isFinite(cfg.impliedVolatility) || cfg.impliedVolatility <= 0 || cfg.impliedVolatility > 5) {
+      errors.push('optionExecution.impliedVolatility must be greater than 0 and at most 5')
     }
   }
 
